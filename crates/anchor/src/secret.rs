@@ -125,9 +125,6 @@ fn validate_name(name: &str) -> Result<()> {
         if segment == "." || segment == ".." {
             bail!("secret name must not contain traversal segments");
         }
-        if segment.starts_with('-') {
-            bail!("secret name must not start with a dash");
-        }
     }
 
     Ok(())
@@ -156,6 +153,12 @@ mod tests {
     fn entry_path_appends_gpg_extension_to_leaf() {
         let path = entry_path(Path::new("/tmp/store"), "service/login").expect("path");
         assert_eq!(path, Path::new("/tmp/store/service/login.gpg"));
+    }
+
+    #[test]
+    fn entry_path_allows_leading_dash_segments() {
+        let path = entry_path(Path::new("/tmp/store"), "-prod/api").expect("path");
+        assert_eq!(path, Path::new("/tmp/store/-prod/api.gpg"));
     }
 
     #[test]
