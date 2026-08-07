@@ -15,16 +15,30 @@ pub fn init_repo(store_root: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn add_path(store_root: &Path, path: &str) -> Result<()> {
+pub fn add_path(store_root: &Path, path: impl AsRef<Path>) -> Result<()> {
     let status = Command::new("git")
         .arg("-C")
         .arg(store_root)
         .arg("add")
-        .arg(path)
+        .arg("--")
+        .arg(path.as_ref())
         .status()
         .context("failed to invoke git add")?;
 
     ensure_success(status, "git add")?;
+    Ok(())
+}
+
+pub fn remove_path(store_root: &Path, path: impl AsRef<Path>) -> Result<()> {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(store_root)
+        .args(["rm", "-q", "--force", "--"])
+        .arg(path.as_ref())
+        .status()
+        .context("failed to invoke git rm")?;
+
+    ensure_success(status, "git rm")?;
     Ok(())
 }
 

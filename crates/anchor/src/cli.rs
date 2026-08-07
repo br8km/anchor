@@ -1,6 +1,7 @@
+use std::io::Read;
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
 
 use crate::store;
@@ -24,6 +25,10 @@ pub struct Cli {
 enum Commands {
     Init(InitArgs),
     Vault(VaultArgs),
+    Add(SecretArgs),
+    Edit(SecretArgs),
+    Remove(SecretArgs),
+    Generate(SecretArgs),
 }
 
 #[derive(Args, Debug, Default)]
@@ -36,6 +41,12 @@ struct InitArgs {
 struct VaultArgs {
     #[command(subcommand)]
     action: VaultAction,
+}
+
+#[derive(Args, Debug)]
+struct SecretArgs {
+    #[arg(value_name = "NAME")]
+    name: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -52,6 +63,25 @@ pub fn run() -> Result<()> {
         Commands::Init(args) => {
             let report = store::init(&cli.store, &args.recipients)?;
             println!("initialized store at {}", report.store_root.display());
+        }
+        Commands::Add(args) => {
+            let plaintext = read_stdin()?;
+            let report = store::add_secret(&cli.store, &args.name, &plaintext)?;
+            println!("added secret at {}", report.entry_path.display());
+        }
+        Commands::Edit(args) => {
+            let plaintext = read_stdin()?;
+            let replacement = first_line(&plaintext)?;
+            let report = store::edit_secret(&cli.store, &args.name, replacement)?;
+            println!("edited secret at {}", report.entry_path.display());
+        }
+        Commands::Remove(args) => {
+            let report = store::remove_secret(&cli.store, &args.name)?;
+            println!("removed secret at {}", report.entry_path.display());
+        }
+        Commands::Generate(args) => {
+            let report = store::generate_secret(&cli.store, &args.name)?;
+            println!("generated secret at {}", report.entry_path.display());
         }
         Commands::Vault(args) => match args.action {
             VaultAction::Open => {
@@ -83,4 +113,18 @@ fn default_store_root() -> PathBuf {
             let home = std::env::var_os("HOME").unwrap_or_else(|| ".".into());
             PathBuf::from(home).join(".password-store")
         })
+}
+
+fn read_stdin() -> Result<String> {
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    Ok(input)
+}
+
+fn first_line(input: &str) -> Result<&str> {
+    let line = input.lines().next().unwrap_or("").trim_end_matches('\r');
+    if line.is_empty() {
+        bail!("a secret value is required");
+    }
+    Ok(line)
 }

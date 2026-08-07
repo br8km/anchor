@@ -4,11 +4,18 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 
 use crate::git;
+use crate::secret;
 use crate::vault::{vault_paths, VaultReport, VaultStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitReport {
     pub store_root: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretReport {
+    pub store_root: PathBuf,
+    pub entry_path: PathBuf,
 }
 
 pub fn init(store_root: &Path, recipients: &[String]) -> Result<InitReport> {
@@ -75,6 +82,100 @@ pub fn vault_status(store_root: &Path) -> Result<VaultStatus> {
     })
 }
 
+pub fn add_secret(store_root: &Path, name: &str, plaintext: &str) -> Result<SecretReport> {
+    let entry_path = secret::entry_path(store_root, name)?;
+    let relative = relative_entry_path(store_root, &entry_path)?;
+    required_first_line(plaintext)?;
+    let recipients = load_recipients(store_root)?;
+
+    with_mutating_vault(store_root, || {
+        if entry_path.exists() {
+            bail!("secret already exists");
+        }
+
+        secret::encrypt_entry(&entry_path, &recipients, plaintext)?;
+        git::add_path(store_root, &relative)?;
+        git::commit(store_root, &format!("Add secret {name}"))?;
+        Ok(())
+    })?;
+
+    Ok(SecretReport {
+        store_root: store_root.to_path_buf(),
+        entry_path,
+    })
+}
+
+pub fn edit_secret(store_root: &Path, name: &str, replacement: &str) -> Result<SecretReport> {
+    let entry_path = secret::entry_path(store_root, name)?;
+    let relative = relative_entry_path(store_root, &entry_path)?;
+    required_first_line(replacement)?;
+    let recipients = load_recipients(store_root)?;
+
+    with_mutating_vault(store_root, || {
+        if !entry_path.is_file() {
+            bail!("secret does not exist");
+        }
+
+        let existing = secret::decrypt_entry(&entry_path)?;
+        let updated = secret::replace_first_line(&existing, replacement);
+        secret::encrypt_entry(&entry_path, &recipients, &updated)?;
+        git::add_path(store_root, &relative)?;
+        git::commit(store_root, &format!("Edit secret {name}"))?;
+        Ok(())
+    })?;
+
+    Ok(SecretReport {
+        store_root: store_root.to_path_buf(),
+        entry_path,
+    })
+}
+
+pub fn generate_secret(store_root: &Path, name: &str) -> Result<SecretReport> {
+    let entry_path = secret::entry_path(store_root, name)?;
+    let relative = relative_entry_path(store_root, &entry_path)?;
+    let recipients = load_recipients(store_root)?;
+
+    with_mutating_vault(store_root, || {
+        let updated = if entry_path.is_file() {
+            let existing = secret::decrypt_entry(&entry_path)?;
+            secret::replace_first_line(&existing, &secret::generate_secret())
+        } else {
+            format!("{}\n", secret::generate_secret())
+        };
+
+        secret::encrypt_entry(&entry_path, &recipients, &updated)?;
+        git::add_path(store_root, &relative)?;
+        git::commit(store_root, &format!("Generate secret {name}"))?;
+        Ok(())
+    })?;
+
+    Ok(SecretReport {
+        store_root: store_root.to_path_buf(),
+        entry_path,
+    })
+}
+
+pub fn remove_secret(store_root: &Path, name: &str) -> Result<SecretReport> {
+    let entry_path = secret::entry_path(store_root, name)?;
+    let relative = relative_entry_path(store_root, &entry_path)?;
+
+    with_mutating_vault(store_root, || {
+        if !entry_path.is_file() {
+            bail!("secret does not exist");
+        }
+
+        secret::remove_entry(&entry_path)?;
+        git::remove_path(store_root, &relative)?;
+        git::commit(store_root, &format!("Remove secret {name}"))?;
+        Ok(())
+    })?;
+
+    Ok(SecretReport {
+        store_root: store_root.to_path_buf(),
+        entry_path,
+    })
+}
+
 fn ensure_bootstrap_target_is_safe(store_root: &Path) -> Result<()> {
     if !store_root.exists() {
         return Ok(());
@@ -102,6 +203,62 @@ fn ensure_git_clean(store_root: &Path) -> Result<()> {
         bail!("git working tree is dirty");
     }
     Ok(())
+}
+
+fn with_mutating_vault<T>(store_root: &Path, action: impl FnOnce() -> Result<T>) -> Result<T> {
+    ensure_store_exists(store_root)?;
+    ensure_git_clean(store_root)?;
+
+    let paths = vault_paths(store_root);
+    paths.ensure_container_exists()?;
+
+    let was_open = paths.status()?;
+    if !was_open {
+        paths.open()?;
+    }
+
+    let action_result = action();
+    let close_result = if was_open { Ok(()) } else { paths.close() };
+
+    match (action_result, close_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(err), Ok(())) => Err(err),
+        (Ok(_), Err(err)) => Err(err),
+        (Err(err), Err(_)) => Err(err),
+    }
+}
+
+fn load_recipients(store_root: &Path) -> Result<Vec<String>> {
+    let path = store_root.join(".gpg-id");
+    let contents =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let recipients = contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+
+    if recipients.is_empty() {
+        bail!("at least one recipient is required");
+    }
+
+    Ok(recipients)
+}
+
+fn relative_entry_path(store_root: &Path, entry_path: &Path) -> Result<PathBuf> {
+    entry_path
+        .strip_prefix(store_root)
+        .map(Path::to_path_buf)
+        .context("secret path escaped the store root")
+}
+
+fn required_first_line(input: &str) -> Result<&str> {
+    let line = input.lines().next().unwrap_or("").trim_end_matches('\r');
+    if line.is_empty() {
+        bail!("a secret value is required");
+    }
+    Ok(line)
 }
 
 fn write_recipient_metadata(store_root: &Path, recipients: &[String]) -> Result<()> {

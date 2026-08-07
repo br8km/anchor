@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod git;
+mod secret;
 pub mod store;
 pub mod vault;
 
