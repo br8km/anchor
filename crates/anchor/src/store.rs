@@ -17,15 +17,25 @@ pub fn init(store_root: &Path, recipients: &[String]) -> Result<InitReport> {
     fs::create_dir_all(store_root)
         .with_context(|| format!("failed to create store root {}", store_root.display()))?;
 
-    git::init_repo(store_root)?;
-    write_recipient_metadata(store_root, recipients)?;
-    git::add_path(store_root, ".gpg-id")?;
-    git::commit(store_root, "Initialize anchor vault")?;
     let recipient = recipients
         .first()
         .map(String::as_str)
-        .unwrap_or("anchor-bootstrap");
-    vault_paths(store_root).initialize(recipient)?;
+        .context("at least one recipient is required")?;
+    let paths = vault_paths(store_root);
+    paths.initialize(recipient)?;
+    paths.open()?;
+
+    let result = (|| -> Result<()> {
+        git::init_repo(store_root)?;
+        write_recipient_metadata(store_root, recipients)?;
+        git::add_path(store_root, ".gpg-id")?;
+        git::commit(store_root, "Initialize anchor vault")?;
+        Ok(())
+    })();
+
+    let close_result = paths.close();
+    result?;
+    close_result?;
 
     Ok(InitReport {
         store_root: store_root.to_path_buf(),

@@ -17,8 +17,14 @@ fn fake_tomb(dir: &TempDir) -> PathBuf {
     let tomb = dir.path().join("tomb");
     let script = r#"#!/bin/sh
 set -eu
+log_cmd() {
+  if [ -n "${TOMB_LOG:-}" ]; then
+    printf '%s\n' "$*" >> "$TOMB_LOG"
+  fi
+}
 cmd="$1"
 shift || true
+log_cmd "$cmd $*"
 case "$cmd" in
   dig)
     tomb_file="$1"
@@ -68,6 +74,10 @@ esac
     tomb
 }
 
+fn tomb_log(dir: &TempDir) -> PathBuf {
+    dir.path().join("tomb.log")
+}
+
 fn command_with_env(dir: &TempDir, store: &Path) -> Command {
     let tomb_dir = fake_tomb(dir).parent().expect("tomb dir").to_path_buf();
     let current_path = std::env::var_os("PATH").unwrap_or_default();
@@ -85,18 +95,22 @@ fn command_with_env(dir: &TempDir, store: &Path) -> Command {
 fn init_creates_layout_and_reports_success() {
     let tmp = TempDir::new().expect("tempdir");
     let store = store_path(&tmp);
+    let log = tomb_log(&tmp);
+    let recipient = "alice@example.com";
 
     command_with_env(&tmp, &store)
-        .args(["init"])
+        .env("TOMB_LOG", &log)
+        .args(["init", "--recipient", recipient])
         .assert()
         .success()
         .stdout(predicates::str::contains("initialized store"));
 
     assert!(store.is_dir(), "store root should exist");
     assert!(store.join(".git").is_dir(), "git repository should exist");
-    assert!(
-        store.join(".gpg-id").is_file(),
-        "recipient metadata should exist"
+    assert_eq!(
+        fs::read_to_string(store.join(".gpg-id")).expect("read recipient metadata"),
+        format!("{recipient}\n"),
+        "recipient metadata should include the selected recipient"
     );
 
     let parent = store.parent().expect("parent");
@@ -104,6 +118,30 @@ fn init_creates_layout_and_reports_success() {
     let tomb_key = parent.join("vault.tomb.key");
     assert!(tomb.is_file(), "tomb container should exist");
     assert!(tomb_key.is_file(), "tomb key should exist");
+    let parent = store.parent().expect("parent");
+    let tomb_file = parent.join("vault.tomb");
+    let tomb_key_file = parent.join("vault.tomb.key");
+    let tomb_events = fs::read_to_string(&log).expect("read tomb log");
+    assert_eq!(
+        tomb_events.lines().collect::<Vec<_>>(),
+        vec![
+            format!("dig {} -s 10", tomb_file.display()),
+            format!("forge {} -gr {recipient}", tomb_key_file.display()),
+            format!(
+                "lock {} -k {} -gr {recipient}",
+                tomb_file.display(),
+                tomb_key_file.display()
+            ),
+            format!(
+                "open {} -k {} -p {}",
+                tomb_file.display(),
+                tomb_key_file.display(),
+                store.display()
+            ),
+            "close vault".to_string(),
+        ],
+        "init should create, open, and close the tomb during bootstrap",
+    );
 
     command_with_env(&tmp, &store)
         .args(["vault", "status"])
@@ -118,7 +156,7 @@ fn vault_open_and_close_toggle_status() {
     let store = store_path(&tmp);
 
     command_with_env(&tmp, &store)
-        .args(["init"])
+        .args(["init", "--recipient", "alice@example.com"])
         .assert()
         .success();
 
@@ -153,7 +191,7 @@ fn mutating_vault_commands_fail_on_dirty_git_state() {
     let store = store_path(&tmp);
 
     command_with_env(&tmp, &store)
-        .args(["init"])
+        .args(["init", "--recipient", "alice@example.com"])
         .assert()
         .success();
 
