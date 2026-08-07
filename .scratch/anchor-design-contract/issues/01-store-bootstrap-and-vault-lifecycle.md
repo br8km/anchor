@@ -4,8 +4,7 @@
 
 **Blocked by:** None — can start immediately
 
-**Status:** ready-for-agent
+**Status:** implemented
 
-- [ ] `anchor init` creates the password-store layout, Git repository, Tomb container, and initial recipient metadata in a clean environment.
-- [ ] `anchor vault open`, `anchor vault close`, and `anchor vault status` work as explicit commands, and mutating commands fail closed on unsafe Git state before they change the vault.
-
+- [x] `anchor init` creates the password-store layout, Git repository, Tomb container, and initial recipient metadata in a clean environment.
+- [x] `anchor vault open`, `anchor vault close`, and `anchor vault status` work as explicit commands, and mutating commands fail closed on unsafe Git state before they change the vault.
