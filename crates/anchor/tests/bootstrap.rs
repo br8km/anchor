@@ -69,8 +69,14 @@ esac
 }
 
 fn command_with_env(dir: &TempDir, store: &Path) -> Command {
+    let tomb_dir = fake_tomb(dir).parent().expect("tomb dir").to_path_buf();
+    let current_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut new_path = std::ffi::OsString::from(&tomb_dir);
+    new_path.push(":");
+    new_path.push(current_path);
+
     let mut cmd = bin();
-    cmd.env("ANCHOR_TOMB_BIN", fake_tomb(dir))
+    cmd.env("PATH", new_path)
         .args(["--store", store.to_str().expect("store path")]);
     cmd
 }

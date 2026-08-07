@@ -1,4 +1,3 @@
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -98,7 +97,7 @@ impl VaultPaths {
 
     pub fn status(&self) -> Result<bool> {
         let name = tomb_name(&self.tomb_file)?;
-        let output = Command::new(tomb_bin())
+        let output = Command::new("tomb")
             .current_dir(&self.store_root)
             .env("ANCHOR_STORE_ROOT", &self.store_root)
             .arg("status")
@@ -107,7 +106,7 @@ impl VaultPaths {
             .context("failed to invoke tomb status")?;
 
         if !output.status.success() {
-            return Ok(false);
+            bail!("tomb status failed");
         }
 
         let stdout =
@@ -137,7 +136,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    let status = Command::new(tomb_bin())
+    let status = Command::new("tomb")
         .current_dir(store_root.parent().unwrap_or_else(|| Path::new(".")))
         .env("ANCHOR_STORE_ROOT", store_root)
         .args(args)
@@ -149,10 +148,6 @@ where
     } else {
         bail!("tomb command failed");
     }
-}
-
-fn tomb_bin() -> OsString {
-    std::env::var_os("ANCHOR_TOMB_BIN").unwrap_or_else(|| OsString::from("tomb"))
 }
 
 fn tomb_name(path: &Path) -> Result<String> {
