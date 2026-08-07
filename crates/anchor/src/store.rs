@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 
 use crate::git;
-use crate::vault::{vault_marker_path, vault_paths, VaultReport, VaultStatus};
+use crate::vault::{vault_paths, VaultReport, VaultStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitReport {
@@ -21,8 +21,11 @@ pub fn init(store_root: &Path, recipients: &[String]) -> Result<InitReport> {
     write_recipient_metadata(store_root, recipients)?;
     git::add_path(store_root, ".gpg-id")?;
     git::commit(store_root, "Initialize anchor vault")?;
-    vault_paths(store_root).create_placeholders()?;
-    vault_marker_path(store_root).clear()?;
+    let recipient = recipients
+        .first()
+        .map(String::as_str)
+        .unwrap_or("anchor-bootstrap");
+    vault_paths(store_root).initialize(recipient)?;
 
     Ok(InitReport {
         store_root: store_root.to_path_buf(),
@@ -34,7 +37,7 @@ pub fn vault_open(store_root: &Path) -> Result<VaultReport> {
     ensure_git_clean(store_root)?;
     let paths = vault_paths(store_root);
     paths.ensure_container_exists()?;
-    vault_marker_path(store_root).open()?;
+    paths.open()?;
     Ok(VaultReport {
         store_root: store_root.to_path_buf(),
         open: true,
@@ -46,7 +49,7 @@ pub fn vault_close(store_root: &Path) -> Result<VaultReport> {
     ensure_git_clean(store_root)?;
     let paths = vault_paths(store_root);
     paths.ensure_container_exists()?;
-    vault_marker_path(store_root).close()?;
+    paths.close()?;
     Ok(VaultReport {
         store_root: store_root.to_path_buf(),
         open: false,
@@ -55,7 +58,7 @@ pub fn vault_close(store_root: &Path) -> Result<VaultReport> {
 
 pub fn vault_status(store_root: &Path) -> Result<VaultStatus> {
     ensure_store_exists(store_root)?;
-    let open = vault_marker_path(store_root).is_open();
+    let open = vault_paths(store_root).status()?;
     Ok(VaultStatus {
         store_root: store_root.to_path_buf(),
         open,

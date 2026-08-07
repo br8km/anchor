@@ -1,7 +1,8 @@
-use std::fs;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VaultReport {
@@ -23,59 +24,95 @@ pub struct VaultPaths {
 }
 
 impl VaultPaths {
-    pub fn create_placeholders(&self) -> Result<()> {
-        if let Some(parent) = self.tomb_file.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create tomb parent {}", parent.display()))?;
-        }
-
-        if !self.tomb_file.exists() {
-            fs::write(&self.tomb_file, b"")
-                .with_context(|| format!("failed to write {}", self.tomb_file.display()))?;
-        }
-
-        if !self.tomb_key_file.exists() {
-            fs::write(&self.tomb_key_file, b"")
-                .with_context(|| format!("failed to write {}", self.tomb_key_file.display()))?;
-        }
-
-        Ok(())
+    pub fn initialize(&self, recipient: &str) -> Result<()> {
+        run_tomb(
+            &self.store_root,
+            [
+                "dig",
+                self.tomb_file
+                    .to_str()
+                    .ok_or_else(|| anyhow!("tomb path contains invalid UTF-8"))?,
+                "-s",
+                "10",
+            ],
+        )?;
+        run_tomb(
+            &self.store_root,
+            [
+                "forge",
+                self.tomb_key_file
+                    .to_str()
+                    .ok_or_else(|| anyhow!("tomb key path contains invalid UTF-8"))?,
+                "-gr",
+                recipient,
+            ],
+        )?;
+        run_tomb(
+            &self.store_root,
+            [
+                "lock",
+                self.tomb_file
+                    .to_str()
+                    .ok_or_else(|| anyhow!("tomb path contains invalid UTF-8"))?,
+                "-k",
+                self.tomb_key_file
+                    .to_str()
+                    .ok_or_else(|| anyhow!("tomb key path contains invalid UTF-8"))?,
+                "-gr",
+                recipient,
+            ],
+        )
     }
 
     pub fn ensure_container_exists(&self) -> Result<()> {
         if !self.tomb_file.exists() || !self.tomb_key_file.exists() {
-            anyhow::bail!("tomb container is missing");
+            bail!("tomb container is missing");
         }
         Ok(())
     }
-}
 
-#[derive(Debug, Clone)]
-pub struct VaultMarker {
-    path: PathBuf,
-}
-
-impl VaultMarker {
     pub fn open(&self) -> Result<()> {
-        fs::write(&self.path, b"open")
-            .with_context(|| format!("failed to write {}", self.path.display()))?;
-        Ok(())
+        run_tomb(
+            &self.store_root,
+            [
+                "open",
+                self.tomb_file
+                    .to_str()
+                    .ok_or_else(|| anyhow!("tomb path contains invalid UTF-8"))?,
+                "-k",
+                self.tomb_key_file
+                    .to_str()
+                    .ok_or_else(|| anyhow!("tomb key path contains invalid UTF-8"))?,
+                "-p",
+                self.store_root
+                    .to_str()
+                    .ok_or_else(|| anyhow!("store root contains invalid UTF-8"))?,
+            ],
+        )
     }
 
     pub fn close(&self) -> Result<()> {
-        if self.path.exists() {
-            fs::remove_file(&self.path)
-                .with_context(|| format!("failed to remove {}", self.path.display()))?;
+        let name = tomb_name(&self.tomb_file)?;
+        run_tomb(&self.store_root, ["close", &name])
+    }
+
+    pub fn status(&self) -> Result<bool> {
+        let name = tomb_name(&self.tomb_file)?;
+        let output = Command::new(tomb_bin())
+            .current_dir(&self.store_root)
+            .env("ANCHOR_STORE_ROOT", &self.store_root)
+            .arg("status")
+            .arg(name)
+            .output()
+            .context("failed to invoke tomb status")?;
+
+        if !output.status.success() {
+            return Ok(false);
         }
-        Ok(())
-    }
 
-    pub fn clear(&self) -> Result<()> {
-        self.close()
-    }
-
-    pub fn is_open(&self) -> bool {
-        self.path.exists()
+        let stdout =
+            String::from_utf8(output.stdout).context("tomb status output was not utf-8")?;
+        Ok(stdout.trim().eq_ignore_ascii_case("open"))
     }
 }
 
@@ -95,13 +132,33 @@ pub fn vault_paths(store_root: &Path) -> VaultPaths {
     }
 }
 
-pub fn vault_marker_path(store_root: &Path) -> VaultMarker {
-    let name = store_root
-        .file_name()
-        .and_then(|part| part.to_str())
-        .unwrap_or("anchor");
-    let parent = store_root.parent().unwrap_or_else(|| Path::new("."));
-    VaultMarker {
-        path: parent.join(format!(".{name}.vault-open")),
+fn run_tomb<I, S>(store_root: &Path, args: I) -> Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let status = Command::new(tomb_bin())
+        .current_dir(store_root.parent().unwrap_or_else(|| Path::new(".")))
+        .env("ANCHOR_STORE_ROOT", store_root)
+        .args(args)
+        .status()
+        .context("failed to invoke tomb")?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("tomb command failed");
     }
+}
+
+fn tomb_bin() -> OsString {
+    std::env::var_os("ANCHOR_TOMB_BIN").unwrap_or_else(|| OsString::from("tomb"))
+}
+
+fn tomb_name(path: &Path) -> Result<String> {
+    let stem = path
+        .file_stem()
+        .and_then(|part| part.to_str())
+        .ok_or_else(|| anyhow!("failed to determine tomb name"))?;
+    Ok(stem.to_string())
 }
