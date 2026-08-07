@@ -4,8 +4,7 @@
 
 **Blocked by:** 01 — Store bootstrap and vault lifecycle
 
-**Status:** ready-for-agent
+**Status:** implemented
 
-- [ ] `anchor add`, `anchor edit`, `anchor remove`, and `anchor generate` work against real entries in the password-store layout.
-- [ ] Generated and edited secrets stay in the first line by default, preserve existing metadata when appropriate, and never leak plaintext in logs or command-line arguments.
-
+- [x] `anchor add`, `anchor edit`, `anchor remove`, and `anchor generate` work against real entries in the password-store layout.
+- [x] Generated and edited secrets stay in the first line by default, preserve existing metadata when appropriate, and never leak plaintext in logs or command-line arguments.
