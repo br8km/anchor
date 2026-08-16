@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -249,6 +250,57 @@ pub fn edit_metadata(store_root: &Path, name: &str, replacement: &str) -> Result
     })
 }
 
+pub fn resolve_update_targets(store_root: &Path, targets: &[String]) -> Result<Vec<String>> {
+    ensure_store_exists(store_root)?;
+
+    let mut resolved = BTreeSet::new();
+    for target in targets {
+        for name in resolve_update_target(store_root, target)? {
+            resolved.insert(name);
+        }
+    }
+
+    if resolved.is_empty() {
+        bail!("no matching secrets found");
+    }
+
+    Ok(resolved.into_iter().collect())
+}
+
+pub fn update_secret(
+    store_root: &Path,
+    name: &str,
+    replacement: &str,
+    multiline: bool,
+) -> Result<SecretReport> {
+    let entry_path = secret::entry_path(store_root, name)?;
+    let relative = relative_entry_path(store_root, &entry_path)?;
+    let replacement_line = required_first_line(replacement)?;
+    let recipients = load_recipients(store_root)?;
+
+    with_mutating_vault(store_root, || {
+        if !entry_path.is_file() {
+            bail!("secret does not exist");
+        }
+
+        let existing = secret::decrypt_entry(&entry_path)?;
+        let updated = if multiline {
+            replacement.to_string()
+        } else {
+            secret::replace_first_line(&existing, replacement_line)
+        };
+        secret::encrypt_entry(&entry_path, &recipients, &updated)?;
+        git::add_path(store_root, &relative)?;
+        git::commit(store_root, &format!("Update secret {name}"))?;
+        Ok(())
+    })?;
+
+    Ok(SecretReport {
+        store_root: store_root.to_path_buf(),
+        entry_path,
+    })
+}
+
 fn ensure_bootstrap_target_is_safe(store_root: &Path) -> Result<()> {
     if !store_root.exists() {
         return Ok(());
@@ -355,6 +407,96 @@ fn decrypt_secret_body(store_root: &Path, name: &str) -> Result<String> {
 
 fn required_first_line(input: &str) -> Result<&str> {
     secret::first_line(input)
+}
+
+fn resolve_update_target(store_root: &Path, target: &str) -> Result<Vec<String>> {
+    if contains_glob_metacharacters(target) {
+        return resolve_glob_target(store_root, target);
+    }
+
+    let path = target_path(store_root, target);
+    if path.is_dir() {
+        return collect_update_targets_from_directory(store_root, &path);
+    }
+
+    if path.is_file() && path.extension() == Some(OsStr::new("gpg")) {
+        return Ok(vec![secret_name_from_entry_path(store_root, &path)?]);
+    }
+
+    let entry_path = secret::entry_path(store_root, target)?;
+    if entry_path.is_file() {
+        return Ok(vec![target.to_string()]);
+    }
+
+    bail!("no matching secrets found for {target}");
+}
+
+fn resolve_glob_target(store_root: &Path, target: &str) -> Result<Vec<String>> {
+    let pattern = target_path(store_root, target)
+        .to_string_lossy()
+        .into_owned();
+    let mut names = Vec::new();
+
+    for entry in glob::glob(&pattern).with_context(|| format!("invalid glob pattern {target}"))? {
+        let path = entry.with_context(|| format!("failed to resolve glob pattern {target}"))?;
+        if path.is_dir() {
+            names.extend(collect_update_targets_from_directory(store_root, &path)?);
+            continue;
+        }
+
+        if path.extension() == Some(OsStr::new("gpg")) {
+            names.push(secret_name_from_entry_path(store_root, &path)?);
+        }
+    }
+
+    finalize_update_targets(names, || format!("no matching secrets found for {target}"))
+}
+
+fn collect_update_targets_from_directory(
+    store_root: &Path,
+    directory: &Path,
+) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    collect_secrets(store_root, directory, &mut names)?;
+    finalize_update_targets(names, || {
+        format!("no matching secrets found in {}", directory.display())
+    })
+}
+
+fn target_path(store_root: &Path, target: &str) -> PathBuf {
+    let path = Path::new(target);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        store_root.join(path)
+    }
+}
+
+fn contains_glob_metacharacters(target: &str) -> bool {
+    target.chars().any(|ch| matches!(ch, '*' | '?' | '['))
+}
+
+fn secret_name_from_entry_path(store_root: &Path, entry_path: &Path) -> Result<String> {
+    let relative = relative_entry_path(store_root, entry_path)?;
+    let mut name = relative.to_string_lossy().to_string();
+    if let Some(stripped) = name.strip_suffix(".gpg") {
+        name = stripped.to_string();
+    }
+    Ok(name)
+}
+
+fn finalize_update_targets(
+    mut names: Vec<String>,
+    empty_message: impl FnOnce() -> String,
+) -> Result<Vec<String>> {
+    names.sort();
+    names.dedup();
+
+    if names.is_empty() {
+        bail!("{}", empty_message());
+    }
+
+    Ok(names)
 }
 
 fn write_recipient_metadata(store_root: &Path, recipients: &[String]) -> Result<()> {

@@ -4,8 +4,7 @@
 
 **Blocked by:** 02 — Secret write and generation, 03 — Secret read and browse
 
-**Status:** ready-for-agent
+**Status:** implemented
 
-- [ ] `anchor update` shows the current secret, asks for confirmation, and replaces the first line by default.
-- [ ] `anchor update` supports directory and glob targeting, with explicit multiline update mode when the user wants to replace more than the first line.
-
+- [x] `anchor update` shows the current secret, asks for confirmation, and replaces the first line by default.
+- [x] `anchor update` supports directory and glob targeting, with explicit multiline update mode when the user wants to replace more than the first line.

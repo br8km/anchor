@@ -476,3 +476,164 @@ fn metadata_edit_rejects_ambiguous_existing_metadata() {
         "ambiguous existing metadata should prevent editing and keep the entry unchanged"
     );
 }
+
+#[test]
+fn password_update_requires_confirmation_before_changing_secret() {
+    let tmp = TempDir::new().expect("tempdir");
+    let store = store_path(&tmp);
+    let _gpg = fake_gpg(&tmp);
+    let gpg_log = tmp.path().join("gpg.log");
+    let tomb_log = tmp.path().join("tomb.log");
+    let secret_name = "services/email";
+    let secret_path = store.join("services/email.gpg");
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["init", "--recipient", "alice@example.com"])
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["add", secret_name])
+        .write_stdin("first-secret\nurl=https://example.test\nnotes=keep\n")
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["update", secret_name])
+        .write_stdin("n\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("update cancelled"));
+
+    assert_eq!(
+        fs::read_to_string(&secret_path).expect("read untouched secret"),
+        "first-secret\nurl=https://example.test\nnotes=keep\n",
+        "refusing confirmation should leave the entry unchanged"
+    );
+}
+
+#[test]
+fn password_update_replaces_first_line_by_default() {
+    let tmp = TempDir::new().expect("tempdir");
+    let store = store_path(&tmp);
+    let _gpg = fake_gpg(&tmp);
+    let gpg_log = tmp.path().join("gpg.log");
+    let tomb_log = tmp.path().join("tomb.log");
+    let secret_name = "services/email";
+    let secret_path = store.join("services/email.gpg");
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["init", "--recipient", "alice@example.com"])
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["add", secret_name])
+        .write_stdin("first-secret\nurl=https://example.test\nnotes=keep\n")
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["update", secret_name])
+        .write_stdin("y\nrotated-secret\n")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("first-secret"))
+        .stdout(predicates::str::contains("updated secret at"));
+
+    assert_eq!(
+        fs::read_to_string(&secret_path).expect("read updated secret"),
+        "rotated-secret\nurl=https://example.test\nnotes=keep\n",
+        "default update should replace only the first line"
+    );
+}
+
+#[test]
+fn password_update_supports_directory_glob_and_multiline() {
+    let tmp = TempDir::new().expect("tempdir");
+    let store = store_path(&tmp);
+    let _gpg = fake_gpg(&tmp);
+    let gpg_log = tmp.path().join("gpg.log");
+    let tomb_log = tmp.path().join("tomb.log");
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["init", "--recipient", "alice@example.com"])
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["add", "services/email"])
+        .write_stdin("email-secret\nurl=https://email.example\nnotes=keep-email\n")
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["add", "services/chat"])
+        .write_stdin("chat-secret\nurl=https://chat.example\nnotes=keep-chat\n")
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["add", "personal/blog"])
+        .write_stdin("blog-secret\nurl=https://blog.example\nnotes=keep-blog\n")
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["update", "services"])
+        .write_stdin("y\nshared-secret\n")
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(store.join("services/email.gpg")).expect("read updated email"),
+        "shared-secret\nurl=https://email.example\nnotes=keep-email\n",
+        "directory targeting should update every matching secret"
+    );
+    assert_eq!(
+        fs::read_to_string(store.join("services/chat.gpg")).expect("read updated chat"),
+        "shared-secret\nurl=https://chat.example\nnotes=keep-chat\n",
+        "directory targeting should update every matching secret"
+    );
+    assert_eq!(
+        fs::read_to_string(store.join("personal/blog.gpg")).expect("read untouched blog"),
+        "blog-secret\nurl=https://blog.example\nnotes=keep-blog\n",
+        "directory targeting should not affect other branches"
+    );
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["update", "personal/*", "--multiline"])
+        .write_stdin("y\nmultiline-secret\nurl=https://new.example\nnotes=updated\n")
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(store.join("personal/blog.gpg")).expect("read multiline blog"),
+        "multiline-secret\nurl=https://new.example\nnotes=updated\n",
+        "multiline update mode should replace the full entry body"
+    );
+}

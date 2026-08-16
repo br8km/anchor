@@ -1,7 +1,7 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand};
-use std::io::Read;
-use std::path::PathBuf;
+use std::io::{BufRead, Read, Write};
+use std::path::{Path, PathBuf};
 
 use crate::clipboard;
 use crate::secret;
@@ -37,6 +37,7 @@ enum Commands {
     Edit(SecretArgs),
     Remove(SecretArgs),
     Generate(SecretArgs),
+    Update(UpdateArgs),
     Show(SecretArgs),
     #[command(name = "meta")]
     Meta(SecretArgs),
@@ -63,6 +64,14 @@ struct VaultArgs {
 struct SecretArgs {
     #[arg(value_name = "NAME")]
     name: String,
+}
+
+#[derive(Args, Debug)]
+struct UpdateArgs {
+    #[arg(value_name = "PATH", num_args = 1..)]
+    targets: Vec<String>,
+    #[arg(long = "multiline")]
+    multiline: bool,
 }
 
 #[derive(Args, Debug)]
@@ -104,6 +113,19 @@ pub fn run() -> Result<()> {
         Commands::Generate(args) => {
             let report = store::generate_secret(&cli.store, &args.name)?;
             println!("generated secret at {}", report.entry_path.display());
+        }
+        Commands::Update(args) => {
+            let targets = store::resolve_update_targets(&cli.store, &args.targets)?;
+            show_update_preview(&cli.store, &targets)?;
+            let mut stdin = std::io::stdin().lock();
+            confirm_update(targets.len(), &mut stdin)?;
+            let replacement = read_update_replacement(args.multiline, &mut stdin)?;
+
+            for target in targets {
+                let report =
+                    store::update_secret(&cli.store, &target, &replacement, args.multiline)?;
+                println!("updated secret at {}", report.entry_path.display());
+            }
         }
         Commands::Show(args) => {
             let secret = store::show_secret(&cli.store, &args.name)?;
@@ -172,4 +194,50 @@ fn read_stdin() -> Result<String> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
     Ok(input)
+}
+
+fn show_update_preview(store_root: &Path, targets: &[String]) -> Result<()> {
+    for target in targets {
+        let current = store::show_secret(store_root, target)?;
+        if targets.len() == 1 {
+            println!("{current}");
+        } else {
+            println!("{target}: {current}");
+        }
+    }
+
+    Ok(())
+}
+
+fn confirm_update(target_count: usize, stdin: &mut impl BufRead) -> Result<()> {
+    eprint!(
+        "replace {}? [y/N] ",
+        if target_count == 1 {
+            "this secret"
+        } else {
+            "these secrets"
+        }
+    );
+    std::io::stderr().flush()?;
+
+    let mut response = String::new();
+    stdin.read_line(&mut response)?;
+    let trimmed = response.trim();
+    if matches!(trimmed, "y" | "Y" | "yes" | "YES") {
+        Ok(())
+    } else {
+        Err(anyhow!("update cancelled"))
+    }
+}
+
+fn read_update_replacement(multiline: bool, stdin: &mut impl BufRead) -> Result<String> {
+    if multiline {
+        let mut body = String::new();
+        stdin.read_to_string(&mut body)?;
+        Ok(body)
+    } else {
+        let mut body = String::new();
+        stdin.read_line(&mut body)?;
+        Ok(body)
+    }
 }
