@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod clipboard;
 pub mod git;
 mod secret;
 pub mod store;

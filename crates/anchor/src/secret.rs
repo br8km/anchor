@@ -39,6 +39,14 @@ pub fn decrypt_entry(path: &Path) -> Result<String> {
         .with_context(|| format!("{} was not valid utf-8", path.display()))
 }
 
+pub fn first_line(text: &str) -> Result<&str> {
+    let line = text.lines().next().unwrap_or("").trim_end_matches('\r');
+    if line.is_empty() {
+        bail!("a secret value is required");
+    }
+    Ok(line)
+}
+
 pub fn encrypt_entry(path: &Path, recipients: &[String], plaintext: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -165,5 +173,11 @@ mod tests {
     fn replace_first_line_preserves_metadata_tail() {
         let updated = replace_first_line("old\nuser=alice\nnotes=ok\n", "new");
         assert_eq!(updated, "new\nuser=alice\nnotes=ok\n");
+    }
+
+    #[test]
+    fn first_line_rejects_empty_secret() {
+        let err = first_line("\nnotes=ok\n").expect_err("should reject empty first line");
+        assert!(err.to_string().contains("required"));
     }
 }

@@ -1,9 +1,10 @@
+use anyhow::Result;
+use clap::{Args, Parser, Subcommand};
 use std::io::Read;
 use std::path::PathBuf;
 
-use anyhow::{bail, Result};
-use clap::{Args, Parser, Subcommand};
-
+use crate::clipboard;
+use crate::secret;
 use crate::store;
 
 #[derive(Parser, Debug)]
@@ -17,6 +18,13 @@ pub struct Cli {
         default_value_os_t = default_store_root()
     )]
     store: PathBuf,
+    #[arg(
+        long = "clipboard-timeout-ms",
+        global = true,
+        value_name = "MILLISECONDS",
+        default_value_t = 10_000
+    )]
+    clipboard_timeout_ms: u64,
     #[command(subcommand)]
     command: Commands,
 }
@@ -29,6 +37,10 @@ enum Commands {
     Edit(SecretArgs),
     Remove(SecretArgs),
     Generate(SecretArgs),
+    Show(SecretArgs),
+    Copy(SecretArgs),
+    List,
+    Grep(GrepArgs),
 }
 
 #[derive(Args, Debug, Default)]
@@ -47,6 +59,12 @@ struct VaultArgs {
 struct SecretArgs {
     #[arg(value_name = "NAME")]
     name: String,
+}
+
+#[derive(Args, Debug)]
+struct GrepArgs {
+    #[arg(value_name = "TERM")]
+    term: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -71,7 +89,7 @@ pub fn run() -> Result<()> {
         }
         Commands::Edit(args) => {
             let plaintext = read_stdin()?;
-            let replacement = first_line(&plaintext)?;
+            let replacement = secret::first_line(&plaintext)?;
             let report = store::edit_secret(&cli.store, &args.name, replacement)?;
             println!("edited secret at {}", report.entry_path.display());
         }
@@ -82,6 +100,28 @@ pub fn run() -> Result<()> {
         Commands::Generate(args) => {
             let report = store::generate_secret(&cli.store, &args.name)?;
             println!("generated secret at {}", report.entry_path.display());
+        }
+        Commands::Show(args) => {
+            let secret = store::show_secret(&cli.store, &args.name)?;
+            println!("{secret}");
+        }
+        Commands::Copy(args) => {
+            let secret = store::show_secret(&cli.store, &args.name)?;
+            clipboard::copy_with_timeout(
+                &secret,
+                std::time::Duration::from_millis(cli.clipboard_timeout_ms),
+            )?;
+            println!("copied secret from {}", args.name);
+        }
+        Commands::List => {
+            for name in store::list_secrets(&cli.store)? {
+                println!("{name}");
+            }
+        }
+        Commands::Grep(args) => {
+            for name in store::grep_secrets(&cli.store, &args.term)? {
+                println!("{name}");
+            }
         }
         Commands::Vault(args) => match args.action {
             VaultAction::Open => {
@@ -119,12 +159,4 @@ fn read_stdin() -> Result<String> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
     Ok(input)
-}
-
-fn first_line(input: &str) -> Result<&str> {
-    let line = input.lines().next().unwrap_or("").trim_end_matches('\r');
-    if line.is_empty() {
-        bail!("a secret value is required");
-    }
-    Ok(line)
 }

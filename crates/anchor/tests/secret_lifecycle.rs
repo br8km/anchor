@@ -1,8 +1,10 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 use tempfile::TempDir;
 
 fn bin() -> Command {
@@ -126,6 +128,17 @@ esac
     fake_binary(dir, "gpg", script)
 }
 
+fn fake_clipboard(dir: &TempDir) -> PathBuf {
+    let script = r#"#!/bin/sh
+set -eu
+if [ -n "${CLIPBOARD_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$CLIPBOARD_LOG"
+fi
+cat > "${CLIPBOARD_DATA:-/dev/null}"
+"#;
+    fake_binary(dir, "wl-copy", script)
+}
+
 fn command_with_env(dir: &TempDir, store: &Path) -> Command {
     let bin_dir = fake_tomb(dir).parent().expect("bin dir").to_path_buf();
     let current_path = std::env::var_os("PATH").unwrap_or_default();
@@ -136,6 +149,23 @@ fn command_with_env(dir: &TempDir, store: &Path) -> Command {
     let mut cmd = bin();
     cmd.env("PATH", new_path)
         .args(["--store", store.to_str().expect("store path")]);
+    cmd
+}
+
+fn command_with_clipboard(dir: &TempDir, store: &Path) -> Command {
+    let bin_dir = fake_clipboard(dir).parent().expect("bin dir").to_path_buf();
+    let current_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut new_path = std::ffi::OsString::from(&bin_dir);
+    new_path.push(":");
+    new_path.push(current_path);
+
+    let mut cmd = bin();
+    cmd.env("PATH", new_path).args([
+        "--store",
+        store.to_str().expect("store path"),
+        "--clipboard-timeout-ms",
+        "1",
+    ]);
     cmd
 }
 
@@ -263,5 +293,84 @@ fn secret_operations_do_not_log_plaintext() {
     assert!(
         !tomb_events.contains(secret),
         "plaintext should not appear in tomb command logs"
+    );
+}
+
+#[test]
+fn show_list_grep_and_copy_secret_entries() {
+    let tmp = TempDir::new().expect("tempdir");
+    let store = store_path(&tmp);
+    let _gpg = fake_gpg(&tmp);
+    let gpg_log = tmp.path().join("gpg.log");
+    let tomb_log = tmp.path().join("tomb.log");
+    let clip_log = tmp.path().join("clip.log");
+    let clip_data = tmp.path().join("clip.data");
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["init", "--recipient", "alice@example.com"])
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["add", "services/email"])
+        .write_stdin("first-secret\nurl=https://example.test\nnotes=keep\n")
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["add", "personal/blog"])
+        .write_stdin("blog-secret\nurl=https://blog.example\n")
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["show", "services/email"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("first-secret"))
+        .stdout(predicates::str::contains("url").not());
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("personal/blog"))
+        .stdout(predicates::str::contains("services/email"));
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["grep", "blog"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("personal/blog"))
+        .stdout(predicates::str::contains("services/email").not());
+
+    command_with_clipboard(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .env("CLIPBOARD_LOG", &clip_log)
+        .env("CLIPBOARD_DATA", &clip_data)
+        .args(["copy", "services/email"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("copied secret"));
+
+    std::thread::sleep(Duration::from_millis(20));
+
+    assert_eq!(
+        fs::read_to_string(&clip_data).expect("read clipboard data"),
+        "",
+        "clipboard should be cleared after the timeout"
     );
 }

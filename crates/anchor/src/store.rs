@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -176,6 +177,44 @@ pub fn remove_secret(store_root: &Path, name: &str) -> Result<SecretReport> {
     })
 }
 
+pub fn show_secret(store_root: &Path, name: &str) -> Result<String> {
+    with_readonly_vault(store_root, || {
+        let body = decrypt_secret_body(store_root, name)?;
+        Ok(secret::first_line(&body)?.to_string())
+    })
+}
+
+pub fn list_secrets(store_root: &Path) -> Result<Vec<String>> {
+    with_readonly_vault(store_root, || {
+        let mut names = Vec::new();
+        collect_secrets(store_root, store_root, &mut names)?;
+        names.sort();
+        Ok(names)
+    })
+}
+
+pub fn grep_secrets(store_root: &Path, term: &str) -> Result<Vec<String>> {
+    ensure_store_exists(store_root)?;
+    let term = term.to_lowercase();
+
+    let matches = with_readonly_vault(store_root, || {
+        let mut matches = Vec::new();
+        let mut names = Vec::new();
+        collect_secrets(store_root, store_root, &mut names)?;
+        names.sort();
+
+        for name in names {
+            let body = decrypt_secret_body(store_root, &name)?;
+            if name.to_lowercase().contains(&term) || body.to_lowercase().contains(&term) {
+                matches.push(name);
+            }
+        }
+        Ok(matches)
+    })?;
+
+    Ok(matches)
+}
+
 fn ensure_bootstrap_target_is_safe(store_root: &Path) -> Result<()> {
     if !store_root.exists() {
         return Ok(());
@@ -228,6 +267,28 @@ fn with_mutating_vault<T>(store_root: &Path, action: impl FnOnce() -> Result<T>)
     }
 }
 
+fn with_readonly_vault<T>(store_root: &Path, action: impl FnOnce() -> Result<T>) -> Result<T> {
+    ensure_store_exists(store_root)?;
+
+    let paths = vault_paths(store_root);
+    paths.ensure_container_exists()?;
+
+    let was_open = paths.status()?;
+    if !was_open {
+        paths.open()?;
+    }
+
+    let action_result = action();
+    let close_result = if was_open { Ok(()) } else { paths.close() };
+
+    match (action_result, close_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(err), Ok(())) => Err(err),
+        (Ok(_), Err(err)) => Err(err),
+        (Err(err), Err(_)) => Err(err),
+    }
+}
+
 fn load_recipients(store_root: &Path) -> Result<Vec<String>> {
     let path = store_root.join(".gpg-id");
     let contents =
@@ -253,12 +314,13 @@ fn relative_entry_path(store_root: &Path, entry_path: &Path) -> Result<PathBuf> 
         .context("secret path escaped the store root")
 }
 
+fn decrypt_secret_body(store_root: &Path, name: &str) -> Result<String> {
+    let entry_path = secret::entry_path(store_root, name)?;
+    secret::decrypt_entry(&entry_path)
+}
+
 fn required_first_line(input: &str) -> Result<&str> {
-    let line = input.lines().next().unwrap_or("").trim_end_matches('\r');
-    if line.is_empty() {
-        bail!("a secret value is required");
-    }
-    Ok(line)
+    secret::first_line(input)
 }
 
 fn write_recipient_metadata(store_root: &Path, recipients: &[String]) -> Result<()> {
@@ -271,5 +333,41 @@ fn write_recipient_metadata(store_root: &Path, recipients: &[String]) -> Result<
         body
     };
     fs::write(&path, body).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
+fn collect_secrets(root: &Path, current: &Path, names: &mut Vec<String>) -> Result<()> {
+    for entry in
+        fs::read_dir(current).with_context(|| format!("failed to inspect {}", current.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        let file_name = entry.file_name();
+        if file_name == OsStr::new(".git")
+            || file_name == OsStr::new(".tomb")
+            || file_name == OsStr::new(".tomb.key")
+            || file_name == OsStr::new(".gpg-id")
+        {
+            continue;
+        }
+
+        if path.is_dir() {
+            collect_secrets(root, &path, names)?;
+            continue;
+        }
+
+        if path.extension() == Some(OsStr::new("gpg")) {
+            let relative = path
+                .strip_prefix(root)
+                .map(Path::to_path_buf)
+                .context("secret path escaped the store root")?;
+            let mut name = relative.to_string_lossy().to_string();
+            if let Some(stripped) = name.strip_suffix(".gpg") {
+                name = stripped.to_string();
+            }
+            names.push(name);
+        }
+    }
+
     Ok(())
 }
