@@ -410,10 +410,6 @@ fn required_first_line(input: &str) -> Result<&str> {
 }
 
 fn resolve_update_target(store_root: &Path, target: &str) -> Result<Vec<String>> {
-    if contains_glob_metacharacters(target) {
-        return resolve_glob_target(store_root, target);
-    }
-
     let path = target_path(store_root, target);
     if path.is_dir() {
         return collect_update_targets_from_directory(store_root, &path);
@@ -426,6 +422,10 @@ fn resolve_update_target(store_root: &Path, target: &str) -> Result<Vec<String>>
     let entry_path = secret::entry_path(store_root, target)?;
     if entry_path.is_file() {
         return Ok(vec![target.to_string()]);
+    }
+
+    if contains_glob_metacharacters(target) {
+        return resolve_glob_target(store_root, target);
     }
 
     bail!("no matching secrets found for {target}");

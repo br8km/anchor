@@ -637,3 +637,45 @@ fn password_update_supports_directory_glob_and_multiline() {
         "multiline update mode should replace the full entry body"
     );
 }
+
+#[test]
+fn password_update_treats_literal_glob_characters_as_paths() {
+    let tmp = TempDir::new().expect("tempdir");
+    let store = store_path(&tmp);
+    let _gpg = fake_gpg(&tmp);
+    let gpg_log = tmp.path().join("gpg.log");
+    let tomb_log = tmp.path().join("tomb.log");
+    let secret_name = "team[old]/api*key";
+    let secret_path = store.join("team[old]/api*key.gpg");
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["init", "--recipient", "alice@example.com"])
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["add", secret_name])
+        .write_stdin("literal-secret\nurl=https://example.test\n")
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["update", secret_name])
+        .write_stdin("y\nrotated-literal-secret\n")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("literal-secret"))
+        .stdout(predicates::str::contains("updated secret at"));
+
+    assert_eq!(
+        fs::read_to_string(&secret_path).expect("read literal glob secret"),
+        "rotated-literal-secret\nurl=https://example.test\n",
+        "literal path targets should still work when the name contains glob metacharacters"
+    );
+}
