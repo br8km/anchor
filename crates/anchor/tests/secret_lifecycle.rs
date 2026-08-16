@@ -374,3 +374,105 @@ fn show_list_grep_and_copy_secret_entries() {
         "clipboard should be cleared after the timeout"
     );
 }
+
+#[test]
+fn metadata_only_view_and_edit_secret_entries() {
+    let tmp = TempDir::new().expect("tempdir");
+    let store = store_path(&tmp);
+    let _gpg = fake_gpg(&tmp);
+    let gpg_log = tmp.path().join("gpg.log");
+    let tomb_log = tmp.path().join("tomb.log");
+    let secret_name = "services/email";
+    let secret_path = store.join("services/email.gpg");
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["init", "--recipient", "alice@example.com"])
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["add", secret_name])
+        .write_stdin("first-secret\nurl=https://example.test\nnotes=keep\n")
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["meta", secret_name])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("url=https://example.test"))
+        .stdout(predicates::str::contains("notes=keep"))
+        .stdout(predicates::str::contains("first-secret").not());
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["metaedit", secret_name])
+        .write_stdin("url=https://new.example\nnotes=updated\n")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("edited metadata"));
+
+    assert_eq!(
+        fs::read_to_string(&secret_path).expect("read edited metadata"),
+        "first-secret\nurl=https://new.example\nnotes=updated\n",
+        "metaedit should preserve the first line and replace the metadata lines"
+    );
+
+    let tomb_events = fs::read_to_string(&tomb_log).expect("read tomb log");
+    assert!(
+        tomb_events.lines().any(|line| line.starts_with("open ")),
+        "metadata commands should open the vault automatically"
+    );
+    assert!(
+        tomb_events.lines().last() == Some("close vault"),
+        "metadata commands should close the vault after use"
+    );
+}
+
+#[test]
+fn metadata_edit_rejects_case_ambiguous_keys() {
+    let tmp = TempDir::new().expect("tempdir");
+    let store = store_path(&tmp);
+    let _gpg = fake_gpg(&tmp);
+    let gpg_log = tmp.path().join("gpg.log");
+    let tomb_log = tmp.path().join("tomb.log");
+    let secret_name = "services/email";
+    let secret_path = store.join("services/email.gpg");
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["init", "--recipient", "alice@example.com"])
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["add", secret_name])
+        .write_stdin("first-secret\nurl=https://example.test\n")
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["metaedit", secret_name])
+        .write_stdin("url=https://new.example\nURL=https://other.example\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("ambiguous"));
+
+    assert_eq!(
+        fs::read_to_string(&secret_path).expect("read untouched metadata"),
+        "first-secret\nurl=https://example.test\n",
+        "ambiguous metadata edits should not change the entry"
+    );
+}

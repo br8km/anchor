@@ -38,6 +38,10 @@ enum Commands {
     Remove(SecretArgs),
     Generate(SecretArgs),
     Show(SecretArgs),
+    #[command(name = "meta")]
+    Meta(SecretArgs),
+    #[command(name = "metaedit")]
+    MetaEdit(SecretArgs),
     Copy(SecretArgs),
     List,
     Grep(GrepArgs),
@@ -104,6 +108,15 @@ pub fn run() -> Result<()> {
         Commands::Show(args) => {
             let secret = store::show_secret(&cli.store, &args.name)?;
             println!("{secret}");
+        }
+        Commands::Meta(args) => {
+            let metadata = store::show_metadata(&cli.store, &args.name)?;
+            print!("{metadata}");
+        }
+        Commands::MetaEdit(args) => {
+            let metadata = read_stdin()?;
+            let report = store::edit_metadata(&cli.store, &args.name, &metadata)?;
+            println!("edited metadata at {}", report.entry_path.display());
         }
         Commands::Copy(args) => {
             let secret = store::show_secret(&cli.store, &args.name)?;

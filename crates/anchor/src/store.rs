@@ -184,6 +184,13 @@ pub fn show_secret(store_root: &Path, name: &str) -> Result<String> {
     })
 }
 
+pub fn show_metadata(store_root: &Path, name: &str) -> Result<String> {
+    with_readonly_vault(store_root, || {
+        let body = decrypt_secret_body(store_root, name)?;
+        Ok(secret::entry_metadata(&body)?.to_string())
+    })
+}
+
 pub fn list_secrets(store_root: &Path) -> Result<Vec<String>> {
     with_readonly_vault(store_root, || {
         let mut names = Vec::new();
@@ -213,6 +220,31 @@ pub fn grep_secrets(store_root: &Path, term: &str) -> Result<Vec<String>> {
     })?;
 
     Ok(matches)
+}
+
+pub fn edit_metadata(store_root: &Path, name: &str, replacement: &str) -> Result<SecretReport> {
+    let entry_path = secret::entry_path(store_root, name)?;
+    let relative = relative_entry_path(store_root, &entry_path)?;
+    secret::validate_metadata_keys(replacement)?;
+    let recipients = load_recipients(store_root)?;
+
+    with_mutating_vault(store_root, || {
+        if !entry_path.is_file() {
+            bail!("secret does not exist");
+        }
+
+        let existing = secret::decrypt_entry(&entry_path)?;
+        let updated = secret::replace_entry_metadata(&existing, replacement)?;
+        secret::encrypt_entry(&entry_path, &recipients, &updated)?;
+        git::add_path(store_root, &relative)?;
+        git::commit(store_root, &format!("Edit metadata {name}"))?;
+        Ok(())
+    })?;
+
+    Ok(SecretReport {
+        store_root: store_root.to_path_buf(),
+        entry_path,
+    })
 }
 
 fn ensure_bootstrap_target_is_safe(store_root: &Path) -> Result<()> {

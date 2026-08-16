@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -45,6 +46,11 @@ pub fn first_line(text: &str) -> Result<&str> {
         bail!("a secret value is required");
     }
     Ok(line)
+}
+
+pub fn entry_metadata(text: &str) -> Result<&str> {
+    first_line(text)?;
+    Ok(text.split_once('\n').map(|(_, tail)| tail).unwrap_or(""))
 }
 
 pub fn encrypt_entry(path: &Path, recipients: &[String], plaintext: &str) -> Result<()> {
@@ -113,6 +119,47 @@ pub fn replace_first_line(existing: &str, replacement: &str) -> String {
     updated
 }
 
+pub fn replace_entry_metadata(existing: &str, replacement: &str) -> Result<String> {
+    let mut updated = String::from(first_line(existing)?);
+    updated.push('\n');
+    updated.push_str(replacement);
+    Ok(updated)
+}
+
+pub fn validate_metadata_keys(metadata: &str) -> Result<()> {
+    let mut seen = HashSet::new();
+
+    for line in metadata.lines() {
+        let Some((key, _)) = line.split_once('=') else {
+            continue;
+        };
+
+        let normalized = key.to_ascii_lowercase();
+        if !seen.insert(normalized) {
+            bail!("metadata keys are ambiguous");
+        }
+    }
+
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub fn metadata_lookup<'a>(metadata: &'a str, key: &str) -> Result<Option<&'a str>> {
+    validate_metadata_keys(metadata)?;
+
+    for line in metadata.lines() {
+        let Some((line_key, value)) = line.split_once('=') else {
+            continue;
+        };
+
+        if line_key.eq_ignore_ascii_case(key) {
+            return Ok(Some(value));
+        }
+    }
+
+    Ok(None)
+}
+
 fn validate_name(name: &str) -> Result<()> {
     if name.is_empty() {
         bail!("secret name is required");
@@ -179,5 +226,35 @@ mod tests {
     fn first_line_rejects_empty_secret() {
         let err = first_line("\nnotes=ok\n").expect_err("should reject empty first line");
         assert!(err.to_string().contains("required"));
+    }
+
+    #[test]
+    fn entry_metadata_returns_tail_after_first_line() {
+        let metadata =
+            entry_metadata("secret\nurl=https://example.test\nnotes=ok\n").expect("metadata body");
+        assert_eq!(metadata, "url=https://example.test\nnotes=ok\n");
+    }
+
+    #[test]
+    fn replace_entry_metadata_preserves_first_line() {
+        let updated =
+            replace_entry_metadata("secret\nurl=https://example.test\n", "notes=updated\n")
+                .expect("updated entry");
+        assert_eq!(updated, "secret\nnotes=updated\n");
+    }
+
+    #[test]
+    fn metadata_lookup_is_case_insensitive() {
+        let value = metadata_lookup("url=https://example.test\nnotes=ok\n", "URL")
+            .expect("lookup")
+            .expect("value");
+        assert_eq!(value, "https://example.test");
+    }
+
+    #[test]
+    fn metadata_lookup_rejects_ambiguous_case_variants() {
+        let err = metadata_lookup("url=https://example.test\nURL=https://other.test\n", "url")
+            .expect_err("should reject ambiguous keys");
+        assert!(err.to_string().contains("ambiguous"));
     }
 }
