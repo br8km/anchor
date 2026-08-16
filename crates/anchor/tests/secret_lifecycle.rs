@@ -437,7 +437,7 @@ fn metadata_only_view_and_edit_secret_entries() {
 }
 
 #[test]
-fn metadata_edit_rejects_case_ambiguous_keys() {
+fn metadata_edit_rejects_ambiguous_existing_metadata() {
     let tmp = TempDir::new().expect("tempdir");
     let store = store_path(&tmp);
     let _gpg = fake_gpg(&tmp);
@@ -457,7 +457,7 @@ fn metadata_edit_rejects_case_ambiguous_keys() {
         .env("GPG_LOG", &gpg_log)
         .env("TOMB_LOG", &tomb_log)
         .args(["add", secret_name])
-        .write_stdin("first-secret\nurl=https://example.test\n")
+        .write_stdin("first-secret\nurl=https://example.test\nURL=https://other.example\n")
         .assert()
         .success();
 
@@ -465,14 +465,14 @@ fn metadata_edit_rejects_case_ambiguous_keys() {
         .env("GPG_LOG", &gpg_log)
         .env("TOMB_LOG", &tomb_log)
         .args(["metaedit", secret_name])
-        .write_stdin("url=https://new.example\nURL=https://other.example\n")
+        .write_stdin("notes=updated\n")
         .assert()
         .failure()
         .stderr(predicates::str::contains("ambiguous"));
 
     assert_eq!(
         fs::read_to_string(&secret_path).expect("read untouched metadata"),
-        "first-secret\nurl=https://example.test\n",
-        "ambiguous metadata edits should not change the entry"
+        "first-secret\nurl=https://example.test\nURL=https://other.example\n",
+        "ambiguous existing metadata should prevent editing and keep the entry unchanged"
     );
 }

@@ -225,7 +225,6 @@ pub fn grep_secrets(store_root: &Path, term: &str) -> Result<Vec<String>> {
 pub fn edit_metadata(store_root: &Path, name: &str, replacement: &str) -> Result<SecretReport> {
     let entry_path = secret::entry_path(store_root, name)?;
     let relative = relative_entry_path(store_root, &entry_path)?;
-    secret::validate_metadata_keys(replacement)?;
     let recipients = load_recipients(store_root)?;
 
     with_mutating_vault(store_root, || {
@@ -234,6 +233,9 @@ pub fn edit_metadata(store_root: &Path, name: &str, replacement: &str) -> Result
         }
 
         let existing = secret::decrypt_entry(&entry_path)?;
+        let current_metadata = secret::entry_metadata(&existing)?;
+        secret::validate_metadata_keys(current_metadata)?;
+        secret::validate_metadata_keys(replacement)?;
         let updated = secret::replace_entry_metadata(&existing, replacement)?;
         secret::encrypt_entry(&entry_path, &recipients, &updated)?;
         git::add_path(store_root, &relative)?;
