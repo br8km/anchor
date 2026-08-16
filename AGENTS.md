@@ -8,6 +8,8 @@
 
 **CodeGraph** (`codegraph_*` tools) is used for structural code questions such as definitions, callers, callees, impact, signatures, and focused symbol context. Use normal file search for literal text, comments, strings, logs, docs, and filenames.  Read `.codegraph/README.md` for details.
 
+**Review agent config**: When spawning review sub-agents, treat [`.codex/agents/default.toml`](/home/gaby/Projects/Archive/anchor/.codex/agents/default.toml) as the source of truth for the review-agent defaults. Pass its `model` and `model_reasoning_effort` values through explicitly, do not hard-code alternate review settings, and fail closed if the config is missing or invalid.
+
 
 ## Agent Skills
 
