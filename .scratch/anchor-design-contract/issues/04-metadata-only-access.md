@@ -4,8 +4,7 @@
 
 **Blocked by:** 02 — Secret write and generation, 03 — Secret read and browse
 
-**Status:** ready-for-agent
+**Status:** implemented
 
-- [ ] `anchor meta` hides the first line while still showing the metadata lines for an entry.
-- [ ] `anchor metaedit` preserves the first line, supports editing the remaining metadata, and fails on ambiguous metadata keys that differ only by case.
-
+- [x] `anchor meta` hides the first line while still showing the metadata lines for an entry.
+- [x] `anchor metaedit` preserves the first line, supports editing the remaining metadata, and fails on ambiguous metadata keys that differ only by case.
