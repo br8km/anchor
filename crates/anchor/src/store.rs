@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 
 use crate::git;
 use crate::secret;
@@ -19,6 +20,18 @@ pub struct InitReport {
 pub struct SecretReport {
     pub store_root: PathBuf,
     pub entry_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportReport {
+    pub source: PathBuf,
+    pub imported: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportReport {
+    pub destination: PathBuf,
+    pub exported: usize,
 }
 
 pub fn init(store_root: &Path, recipients: &[String]) -> Result<InitReport> {
@@ -251,6 +264,86 @@ pub fn edit_metadata(store_root: &Path, name: &str, replacement: &str) -> Result
     })
 }
 
+pub fn import_secrets(
+    store_root: &Path,
+    source: &Path,
+    overwrite: bool,
+    rename: bool,
+) -> Result<ImportReport> {
+    ensure_store_exists(store_root)?;
+    ensure_git_clean(store_root)?;
+    if overwrite && rename {
+        bail!("overwrite and rename are mutually exclusive");
+    }
+
+    let format = MigrationFormat::from_path(source)?;
+    let entries = read_migration_entries(source, format)?;
+    let recipients = load_recipients(store_root)?;
+    let mut planned_names = BTreeSet::new();
+    let mut resolved = Vec::with_capacity(entries.len());
+
+    for entry in &entries {
+        let name = resolve_import_name(store_root, &entry.name, overwrite, rename, &planned_names)?;
+        planned_names.insert(name.clone());
+        resolved.push(name);
+    }
+
+    with_mutating_vault(store_root, || {
+        for (entry, name) in entries.iter().zip(resolved.iter()) {
+            let entry_path = secret::entry_path(store_root, name)?;
+            let relative = relative_entry_path(store_root, &entry_path)?;
+            let body = migration_entry_body(entry)?;
+
+            secret::encrypt_entry(&entry_path, &recipients, &body)?;
+            git::add_path(store_root, &relative)?;
+        }
+
+        git::commit(
+            store_root,
+            &format!("Import secrets from {}", source.display()),
+        )?;
+        Ok(())
+    })?;
+
+    Ok(ImportReport {
+        source: source.to_path_buf(),
+        imported: resolved.len(),
+    })
+}
+
+pub fn export_secrets(store_root: &Path, destination: &Path) -> Result<ExportReport> {
+    ensure_store_exists(store_root)?;
+    let format = MigrationFormat::from_path(destination)?;
+    let destination = destination.to_path_buf();
+
+    let entries = with_readonly_vault(store_root, || {
+        let mut names = Vec::new();
+        collect_secrets(store_root, store_root, &mut names)?;
+        names.sort();
+
+        let mut exports = Vec::with_capacity(names.len());
+        for name in names {
+            let body = decrypt_secret_body(store_root, &name)?;
+            let secret = secret::first_line(&body)?.to_string();
+            let metadata = secret::entry_metadata(&body)?.to_string();
+            exports.push(MigrationEntry {
+                name,
+                secret,
+                metadata,
+            });
+        }
+
+        Ok(exports)
+    })?;
+
+    write_migration_entries(&destination, format, &entries)?;
+
+    Ok(ExportReport {
+        destination,
+        exported: entries.len(),
+    })
+}
+
 pub fn resolve_update_targets(store_root: &Path, targets: &[String]) -> Result<Vec<String>> {
     ensure_store_exists(store_root)?;
 
@@ -351,6 +444,190 @@ pub fn show_totp_code(store_root: &Path, name: &str) -> Result<String> {
 
 pub fn validate_totp_uri(input: &str) -> Result<()> {
     totp::validate_uri(input)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct MigrationEntry {
+    name: String,
+    secret: String,
+    #[serde(default)]
+    metadata: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MigrationFormat {
+    Json,
+    Csv,
+}
+
+impl MigrationFormat {
+    fn from_path(path: &Path) -> Result<Self> {
+        let extension = path
+            .extension()
+            .and_then(OsStr::to_str)
+            .map(|extension| extension.to_ascii_lowercase())
+            .context("migration file must have a .json or .csv extension")?;
+
+        match extension.as_str() {
+            "json" => Ok(Self::Json),
+            "csv" => Ok(Self::Csv),
+            _ => bail!("migration file must have a .json or .csv extension"),
+        }
+    }
+}
+
+fn read_migration_entries(path: &Path, format: MigrationFormat) -> Result<Vec<MigrationEntry>> {
+    let contents =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    ensure_migration_content_matches_format(&contents, format, path)?;
+
+    match format {
+        MigrationFormat::Json => serde_json::from_str(&contents)
+            .with_context(|| format!("failed to parse JSON migration {}", path.display())),
+        MigrationFormat::Csv => {
+            let mut reader = csv::Reader::from_reader(contents.as_bytes());
+            let mut entries = Vec::new();
+            for row in reader.deserialize() {
+                let entry: MigrationEntry = row
+                    .with_context(|| format!("failed to parse CSV migration {}", path.display()))?;
+                entries.push(entry);
+            }
+            Ok(entries)
+        }
+    }
+}
+
+fn ensure_migration_content_matches_format(
+    contents: &str,
+    format: MigrationFormat,
+    path: &Path,
+) -> Result<()> {
+    let trimmed = contents.trim_start();
+    match format {
+        MigrationFormat::Json => {
+            if !matches!(trimmed.chars().next(), Some('[') | Some('{')) {
+                bail!("{} does not look like JSON migration data", path.display());
+            }
+        }
+        MigrationFormat::Csv => {
+            if matches!(trimmed.chars().next(), Some('[') | Some('{')) {
+                bail!("{} does not look like CSV migration data", path.display());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn write_migration_entries(
+    path: &Path,
+    format: MigrationFormat,
+    entries: &[MigrationEntry],
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    match format {
+        MigrationFormat::Json => {
+            let contents = serde_json::to_string_pretty(entries)
+                .context("failed to serialize JSON migration")?;
+            fs::write(path, contents)
+                .with_context(|| format!("failed to write {}", path.display()))?;
+        }
+        MigrationFormat::Csv => {
+            let mut writer = csv::Writer::from_path(path)
+                .with_context(|| format!("failed to write {}", path.display()))?;
+            for entry in entries {
+                writer.serialize(entry).with_context(|| {
+                    format!("failed to serialize CSV migration {}", path.display())
+                })?;
+            }
+            writer
+                .flush()
+                .with_context(|| format!("failed to finish writing {}", path.display()))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn migration_entry_body(entry: &MigrationEntry) -> Result<String> {
+    let secret_line = secret::first_line(&entry.secret)?.to_string();
+    let metadata = normalize_migration_metadata(&entry.name, &entry.metadata)?;
+
+    let mut body = secret_line;
+    body.push('\n');
+    body.push_str(&metadata);
+    Ok(body)
+}
+
+fn normalize_migration_metadata(name: &str, metadata: &str) -> Result<String> {
+    secret::validate_metadata_keys(metadata)?;
+
+    let mut normalized = String::new();
+    for line in metadata.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            normalized.push_str(line);
+            normalized.push('\n');
+            continue;
+        };
+
+        if key.eq_ignore_ascii_case("otp") {
+            let canonical = totp::canonicalize_input(value, Some(name))?;
+            normalized.push_str(key);
+            normalized.push('=');
+            normalized.push_str(&canonical);
+            normalized.push('\n');
+            continue;
+        }
+
+        normalized.push_str(line);
+        normalized.push('\n');
+    }
+
+    Ok(normalized)
+}
+
+fn resolve_import_name(
+    store_root: &Path,
+    name: &str,
+    overwrite: bool,
+    rename: bool,
+    planned_names: &BTreeSet<String>,
+) -> Result<String> {
+    let entry_path = secret::entry_path(store_root, name)?;
+    let collides = entry_path.is_file() || planned_names.contains(name);
+
+    if !collides || overwrite {
+        return Ok(name.to_string());
+    }
+
+    if !rename {
+        bail!("import collision for {name}");
+    }
+
+    let mut attempt = 0usize;
+    loop {
+        let candidate = if attempt == 0 {
+            append_import_suffix(name, "-imported")
+        } else {
+            append_import_suffix(name, &format!("-imported-{attempt}"))
+        };
+        let candidate_path = secret::entry_path(store_root, &candidate)?;
+        if !candidate_path.is_file() && !planned_names.contains(&candidate) {
+            return Ok(candidate);
+        }
+        attempt += 1;
+    }
+}
+
+fn append_import_suffix(name: &str, suffix: &str) -> String {
+    match name.rsplit_once('/') {
+        Some((parent, leaf)) => format!("{parent}/{}{}", leaf, suffix),
+        None => format!("{name}{suffix}"),
+    }
 }
 
 fn ensure_bootstrap_target_is_safe(store_root: &Path) -> Result<()> {

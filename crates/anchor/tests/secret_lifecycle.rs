@@ -844,3 +844,261 @@ fn password_update_treats_literal_glob_characters_as_paths() {
         "literal path targets should still work when the name contains glob metacharacters"
     );
 }
+
+#[test]
+fn migration_json_and_csv_round_trip_secret_metadata_and_totp_data() {
+    let tmp = TempDir::new().expect("tempdir");
+    let _gpg = fake_gpg(&tmp);
+    let gpg_log = tmp.path().join("gpg.log");
+    let tomb_log = tmp.path().join("tomb.log");
+    let store_one = tmp.path().join("vault-one");
+    let store_two = tmp.path().join("vault-two");
+    let store_three = tmp.path().join("vault-three");
+    let json_path = tmp.path().join("vault.json");
+    let csv_path = tmp.path().join("vault.csv");
+    let secret_name = "services/email";
+    let canonical_uri =
+        "otpauth://totp/services%2Femail?secret=JBSWY3DPEHPK3PXP&algorithm=SHA1&digits=6&period=30";
+    let entry_body =
+        format!("first-secret\nurl=https://example.test\nnotes=keep\notp={canonical_uri}\n");
+
+    command_with_env(&tmp, &store_one)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["init", "--recipient", "alice@example.com"])
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store_one)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["add", secret_name])
+        .write_stdin("first-secret\nurl=https://example.test\nnotes=keep\n")
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store_one)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["otp", "add", secret_name])
+        .write_stdin("jbswy3dpehpk3pxp\n")
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store_one)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["export", json_path.to_str().expect("json path")])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("exported 1 secret"));
+
+    let json_export = fs::read_to_string(&json_path).expect("read JSON export");
+    assert!(
+        json_export.contains("\"name\": \"services/email\""),
+        "JSON export should include the entry name"
+    );
+    assert!(
+        json_export.contains("otpauth://totp/services%2Femail"),
+        "JSON export should preserve canonical TOTP data"
+    );
+
+    command_with_env(&tmp, &store_two)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["init", "--recipient", "alice@example.com"])
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store_two)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["import", json_path.to_str().expect("json path")])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("imported 1 secret"));
+
+    assert_eq!(
+        fs::read_to_string(store_two.join("services/email.gpg")).expect("read imported JSON"),
+        entry_body,
+        "JSON import should round-trip the secret text and metadata"
+    );
+
+    command_with_env(&tmp, &store_two)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["export", csv_path.to_str().expect("csv path")])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("exported 1 secret"));
+
+    let csv_export = fs::read_to_string(&csv_path).expect("read CSV export");
+    assert!(
+        csv_export.contains("services/email"),
+        "CSV export should include the entry name"
+    );
+    assert!(
+        csv_export.contains("otpauth://totp/services%2Femail"),
+        "CSV export should preserve canonical TOTP data"
+    );
+
+    command_with_env(&tmp, &store_three)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["init", "--recipient", "alice@example.com"])
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store_three)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["import", csv_path.to_str().expect("csv path")])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(store_three.join("services/email.gpg")).expect("read imported CSV"),
+        entry_body,
+        "CSV import should round-trip the secret text and metadata"
+    );
+}
+
+#[test]
+fn migration_collision_policy_rejects_plain_import_and_allows_overwrite_or_rename() {
+    let tmp = TempDir::new().expect("tempdir");
+    let _gpg = fake_gpg(&tmp);
+    let gpg_log = tmp.path().join("gpg.log");
+    let tomb_log = tmp.path().join("tomb.log");
+    let store_one = tmp.path().join("vault-one");
+    let store_two = tmp.path().join("vault-two");
+    let import_path = tmp.path().join("collision.json");
+    let original_body = "original-secret\nurl=https://example.test\n";
+    let imported_body = "imported-secret\nurl=https://import.example\nnotes=updated\n";
+    let collision_json = "[\n  {\n    \"name\": \"services/email\",\n    \"secret\": \"imported-secret\",\n    \"metadata\": \"url=https://import.example\\nnotes=updated\\n\"\n  },\n  {\n    \"name\": \"services/blog\",\n    \"secret\": \"blog-secret\",\n    \"metadata\": \"url=https://blog.example\\n\"\n  }\n]\n"
+        .to_string();
+
+    fs::write(&import_path, collision_json).expect("write collision import");
+
+    command_with_env(&tmp, &store_one)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["init", "--recipient", "alice@example.com"])
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store_one)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["add", "services/email"])
+        .write_stdin(original_body)
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store_one)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["import", import_path.to_str().expect("import path")])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("collision"));
+
+    assert_eq!(
+        fs::read_to_string(store_one.join("services/email.gpg")).expect("read unchanged secret"),
+        original_body,
+        "plain import should leave the colliding entry untouched"
+    );
+
+    command_with_env(&tmp, &store_one)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args([
+            "import",
+            import_path.to_str().expect("import path"),
+            "--overwrite",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(store_one.join("services/email.gpg")).expect("read overwritten secret"),
+        imported_body,
+        "overwrite should replace the colliding entry"
+    );
+
+    command_with_env(&tmp, &store_two)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["init", "--recipient", "alice@example.com"])
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store_two)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["add", "services/email"])
+        .write_stdin(original_body)
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store_two)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args([
+            "import",
+            import_path.to_str().expect("import path"),
+            "--rename",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(store_two.join("services/email.gpg")).expect("read original secret"),
+        original_body,
+        "rename should keep the original colliding entry"
+    );
+    assert_eq!(
+        fs::read_to_string(store_two.join("services/email-imported.gpg"))
+            .expect("read renamed import"),
+        imported_body,
+        "rename should move the colliding entry to a new name"
+    );
+    assert!(
+        store_two.join("services/blog.gpg").exists(),
+        "rename should still import non-colliding entries"
+    );
+}
+
+#[test]
+fn migration_rejects_unsupported_file_extensions() {
+    let tmp = TempDir::new().expect("tempdir");
+    let _gpg = fake_gpg(&tmp);
+    let gpg_log = tmp.path().join("gpg.log");
+    let tomb_log = tmp.path().join("tomb.log");
+    let store = store_path(&tmp);
+    let unsupported = tmp.path().join("archive.txt");
+
+    fs::write(&unsupported, "not a supported migration file").expect("write unsupported file");
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["init", "--recipient", "alice@example.com"])
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["import", unsupported.to_str().expect("unsupported path")])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(".json or .csv"));
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["export", unsupported.to_str().expect("unsupported path")])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(".json or .csv"));
+}

@@ -47,6 +47,8 @@ enum Commands {
     Copy(SecretArgs),
     List,
     Grep(GrepArgs),
+    Import(ImportArgs),
+    Export(ExportArgs),
     Otp(OtpArgs),
 }
 
@@ -80,6 +82,22 @@ struct UpdateArgs {
 struct GrepArgs {
     #[arg(value_name = "TERM")]
     term: String,
+}
+
+#[derive(Args, Debug)]
+struct ImportArgs {
+    #[arg(value_name = "FILEPATH")]
+    path: PathBuf,
+    #[arg(long = "overwrite")]
+    overwrite: bool,
+    #[arg(long = "rename")]
+    rename: bool,
+}
+
+#[derive(Args, Debug)]
+struct ExportArgs {
+    #[arg(value_name = "FILEPATH")]
+    path: PathBuf,
 }
 
 #[derive(Args, Debug)]
@@ -201,6 +219,25 @@ pub fn run() -> Result<()> {
             for name in store::grep_secrets(&cli.store, &args.term)? {
                 println!("{name}");
             }
+        }
+        Commands::Import(args) => {
+            let report =
+                store::import_secrets(&cli.store, &args.path, args.overwrite, args.rename)?;
+            println!(
+                "imported {} secret{} from {}",
+                report.imported,
+                if report.imported == 1 { "" } else { "s" },
+                report.source.display()
+            );
+        }
+        Commands::Export(args) => {
+            let report = store::export_secrets(&cli.store, &args.path)?;
+            println!(
+                "exported {} secret{} to {}",
+                report.exported,
+                if report.exported == 1 { "" } else { "s" },
+                report.destination.display()
+            );
         }
         Commands::Otp(args) => match args.action {
             OtpAction::Add(args) => {
