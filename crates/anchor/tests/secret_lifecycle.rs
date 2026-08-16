@@ -519,6 +519,171 @@ fn password_update_requires_confirmation_before_changing_secret() {
 }
 
 #[test]
+fn otp_lifecycle_stores_canonical_uri_and_generates_codes() {
+    let tmp = TempDir::new().expect("tempdir");
+    let store = store_path(&tmp);
+    let _gpg = fake_gpg(&tmp);
+    let gpg_log = tmp.path().join("gpg.log");
+    let tomb_log = tmp.path().join("tomb.log");
+    let clip_log = tmp.path().join("clip.log");
+    let clip_data = tmp.path().join("clip.data");
+    let secret_name = "services/email";
+    let secret_path = store.join("services/email.gpg");
+    let canonical_uri =
+        "otpauth://totp/services%2Femail?secret=JBSWY3DPEHPK3PXP&algorithm=SHA1&digits=6&period=30";
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["init", "--recipient", "alice@example.com"])
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["add", secret_name])
+        .write_stdin("first-secret\nurl=https://example.test\n")
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["otp", "add", secret_name])
+        .write_stdin("jbswy3dpehpk3pxp\n")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("stored TOTP data"));
+
+    assert_eq!(
+        fs::read_to_string(&secret_path).expect("read otp entry"),
+        format!("first-secret\nurl=https://example.test\notp={canonical_uri}\n"),
+        "otp add should preserve existing metadata and store the canonical URI"
+    );
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["otp", "uri", secret_name])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(canonical_uri));
+
+    let uri_output = command_with_clipboard(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .env("CLIPBOARD_LOG", &clip_log)
+        .env("CLIPBOARD_DATA", &clip_data)
+        .args(["otp", "uri", secret_name, "--clipboard"])
+        .output()
+        .expect("run otp uri");
+
+    assert!(
+        uri_output.status.success(),
+        "otp uri command should succeed"
+    );
+    assert_eq!(
+        fs::read_to_string(&clip_data).expect("read URI clipboard data"),
+        canonical_uri,
+        "otp uri should copy the canonical URI to the clipboard"
+    );
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["otp", "validate", canonical_uri])
+        .assert()
+        .success();
+
+    let output = command_with_clipboard(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .env("CLIPBOARD_LOG", &clip_log)
+        .env("CLIPBOARD_DATA", &clip_data)
+        .args(["otp", "code", secret_name, "--clipboard"])
+        .output()
+        .expect("run otp code");
+
+    assert!(output.status.success(), "otp code command should succeed");
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let code = stdout.trim();
+    assert_eq!(code.len(), 6, "otp code should be six digits by default");
+    assert!(
+        code.chars().all(|ch| ch.is_ascii_digit()),
+        "otp code should contain only digits"
+    );
+
+    assert_eq!(
+        fs::read_to_string(&clip_data).expect("read clipboard data"),
+        code,
+        "clipboard should receive the current TOTP code"
+    );
+}
+
+#[test]
+fn otp_add_preserves_existing_metadata_key_spelling() {
+    let tmp = TempDir::new().expect("tempdir");
+    let store = store_path(&tmp);
+    let _gpg = fake_gpg(&tmp);
+    let gpg_log = tmp.path().join("gpg.log");
+    let tomb_log = tmp.path().join("tomb.log");
+    let secret_name = "services/email";
+    let secret_path = store.join("services/email.gpg");
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["init", "--recipient", "alice@example.com"])
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["add", secret_name])
+        .write_stdin("first-secret\nOTP=legacy\n")
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["otp", "add", secret_name])
+        .write_stdin("jbswy3dpehpk3pxp\n")
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(&secret_path).expect("read preserved-key entry"),
+        "first-secret\nOTP=otpauth://totp/services%2Femail?secret=JBSWY3DPEHPK3PXP&algorithm=SHA1&digits=6&period=30\n",
+        "otp add should preserve the original metadata key spelling"
+    );
+}
+
+#[test]
+fn otp_validate_rejects_hotp_uris() {
+    let tmp = TempDir::new().expect("tempdir");
+    let store = store_path(&tmp);
+    let _gpg = fake_gpg(&tmp);
+
+    command_with_env(&tmp, &store)
+        .args(["init", "--recipient", "alice@example.com"])
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store)
+        .args([
+            "otp",
+            "validate",
+            "otpauth://hotp/account?secret=JBSWY3DPEHPK3PXP&counter=1",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("only TOTP"));
+}
+
+#[test]
 fn password_update_replaces_first_line_by_default() {
     let tmp = TempDir::new().expect("tempdir");
     let store = store_path(&tmp);

@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::clipboard;
 use crate::secret;
 use crate::store;
+use crate::totp;
 
 #[derive(Parser, Debug)]
 #[command(name = "anchor")]
@@ -46,6 +47,7 @@ enum Commands {
     Copy(SecretArgs),
     List,
     Grep(GrepArgs),
+    Otp(OtpArgs),
 }
 
 #[derive(Args, Debug, Default)]
@@ -78,6 +80,48 @@ struct UpdateArgs {
 struct GrepArgs {
     #[arg(value_name = "TERM")]
     term: String,
+}
+
+#[derive(Args, Debug)]
+struct OtpArgs {
+    #[command(subcommand)]
+    action: OtpAction,
+}
+
+#[derive(Subcommand, Debug)]
+enum OtpAction {
+    Add(OtpNameArgs),
+    Code(OtpCodeArgs),
+    Uri(OtpUriArgs),
+    Validate(OtpValidateArgs),
+}
+
+#[derive(Args, Debug)]
+struct OtpNameArgs {
+    #[arg(value_name = "NAME")]
+    name: String,
+}
+
+#[derive(Args, Debug)]
+struct OtpCodeArgs {
+    #[arg(value_name = "NAME")]
+    name: String,
+    #[arg(long = "clipboard")]
+    clipboard: bool,
+}
+
+#[derive(Args, Debug)]
+struct OtpUriArgs {
+    #[arg(value_name = "NAME")]
+    name: String,
+    #[arg(long = "clipboard")]
+    clipboard: bool,
+}
+
+#[derive(Args, Debug)]
+struct OtpValidateArgs {
+    #[arg(value_name = "URI")]
+    uri: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -158,6 +202,36 @@ pub fn run() -> Result<()> {
                 println!("{name}");
             }
         }
+        Commands::Otp(args) => match args.action {
+            OtpAction::Add(args) => {
+                let input = read_stdin()?;
+                let report = store::add_totp(&cli.store, &args.name, &input)?;
+                println!("stored TOTP data at {}", report.entry_path.display());
+            }
+            OtpAction::Code(args) => {
+                let code = store::show_totp_code(&cli.store, &args.name)?;
+                if args.clipboard {
+                    clipboard::copy_with_timeout(
+                        &code,
+                        std::time::Duration::from_millis(cli.clipboard_timeout_ms),
+                    )?;
+                }
+                println!("{code}");
+            }
+            OtpAction::Uri(args) => {
+                let uri = store::show_totp_uri(&cli.store, &args.name)?;
+                if args.clipboard {
+                    clipboard::copy_with_timeout(
+                        &uri,
+                        std::time::Duration::from_millis(cli.clipboard_timeout_ms),
+                    )?;
+                }
+                println!("{uri}");
+            }
+            OtpAction::Validate(args) => {
+                totp::validate_uri(&args.uri)?;
+            }
+        },
         Commands::Vault(args) => match args.action {
             VaultAction::Open => {
                 let report = store::vault_open(&cli.store)?;

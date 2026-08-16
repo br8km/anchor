@@ -7,6 +7,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::git;
 use crate::secret;
+use crate::totp;
 use crate::vault::{vault_paths, VaultReport, VaultStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -301,6 +302,57 @@ pub fn update_secret(
     })
 }
 
+pub fn add_totp(store_root: &Path, name: &str, input: &str) -> Result<SecretReport> {
+    let entry_path = secret::entry_path(store_root, name)?;
+    let relative = relative_entry_path(store_root, &entry_path)?;
+    let recipients = load_recipients(store_root)?;
+    let canonical_uri = totp::canonicalize_input(input, Some(name))?;
+
+    with_mutating_vault(store_root, || {
+        if !entry_path.is_file() {
+            bail!("secret does not exist");
+        }
+
+        let existing = secret::decrypt_entry(&entry_path)?;
+        let current_metadata = secret::entry_metadata(&existing)?;
+        secret::validate_metadata_keys(current_metadata)?;
+        let updated = upsert_metadata_value(&existing, "otp", &canonical_uri)?;
+        secret::encrypt_entry(&entry_path, &recipients, &updated)?;
+        git::add_path(store_root, &relative)?;
+        git::commit(store_root, &format!("Add TOTP data {name}"))?;
+        Ok(())
+    })?;
+
+    Ok(SecretReport {
+        store_root: store_root.to_path_buf(),
+        entry_path,
+    })
+}
+
+pub fn show_totp_uri(store_root: &Path, name: &str) -> Result<String> {
+    with_readonly_vault(store_root, || {
+        let body = decrypt_secret_body(store_root, name)?;
+        let metadata = secret::entry_metadata(&body)?;
+        let uri = secret::metadata_lookup(metadata, "otp")?
+            .context("TOTP data is missing from this entry")?;
+        totp::canonicalize_uri(uri)
+    })
+}
+
+pub fn show_totp_code(store_root: &Path, name: &str) -> Result<String> {
+    with_readonly_vault(store_root, || {
+        let body = decrypt_secret_body(store_root, name)?;
+        let metadata = secret::entry_metadata(&body)?;
+        let uri = secret::metadata_lookup(metadata, "otp")?
+            .context("TOTP data is missing from this entry")?;
+        totp::current_code(uri)
+    })
+}
+
+pub fn validate_totp_uri(input: &str) -> Result<()> {
+    totp::validate_uri(input)
+}
+
 fn ensure_bootstrap_target_is_safe(store_root: &Path) -> Result<()> {
     if !store_root.exists() {
         return Ok(());
@@ -407,6 +459,46 @@ fn decrypt_secret_body(store_root: &Path, name: &str) -> Result<String> {
 
 fn required_first_line(input: &str) -> Result<&str> {
     secret::first_line(input)
+}
+
+fn upsert_metadata_value(existing: &str, key: &str, value: &str) -> Result<String> {
+    let first_line = secret::first_line(existing)?.to_string();
+    let metadata = secret::entry_metadata(existing)?;
+    let mut updated = String::new();
+    updated.push_str(&first_line);
+    updated.push('\n');
+
+    let mut replaced = false;
+    for line in metadata.lines() {
+        let Some((line_key, _)) = line.split_once('=') else {
+            updated.push_str(line);
+            updated.push('\n');
+            continue;
+        };
+
+        if line_key.eq_ignore_ascii_case(key) {
+            if !replaced {
+                updated.push_str(line_key);
+                updated.push('=');
+                updated.push_str(value);
+                updated.push('\n');
+                replaced = true;
+            }
+            continue;
+        }
+
+        updated.push_str(line);
+        updated.push('\n');
+    }
+
+    if !replaced {
+        updated.push_str(key);
+        updated.push('=');
+        updated.push_str(value);
+        updated.push('\n');
+    }
+
+    Ok(updated)
 }
 
 fn resolve_update_target(store_root: &Path, target: &str) -> Result<Vec<String>> {
