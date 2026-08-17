@@ -296,11 +296,6 @@ pub fn run() -> Result<()> {
                     Some(remote) => println!("remote: {remote}"),
                     None => println!("remote: none"),
                 }
-                match status.remote_branch_exists {
-                    Some(true) => println!("remote branch: present"),
-                    Some(false) => println!("remote branch: missing"),
-                    None => {}
-                }
             }
         },
         Commands::Otp(args) => match args.action {

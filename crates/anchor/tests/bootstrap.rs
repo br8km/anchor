@@ -372,8 +372,7 @@ fn sync_status_reports_remote_state() {
         .stdout(predicates::str::contains("sync status for"))
         .stdout(predicates::str::contains(&branch))
         .stdout(predicates::str::contains("state: clean"))
-        .stdout(predicates::str::contains("remote: origin"))
-        .stdout(predicates::str::contains("remote branch: missing"));
+        .stdout(predicates::str::contains("remote: origin"));
 }
 
 #[test]

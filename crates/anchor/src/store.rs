@@ -55,7 +55,6 @@ pub struct SyncStatus {
     pub branch: Option<String>,
     pub remote: Option<String>,
     pub clean: bool,
-    pub remote_branch_exists: Option<bool>,
 }
 
 pub fn init(store_root: &Path, recipients: &[String]) -> Result<InitReport> {
@@ -154,19 +153,12 @@ pub fn sync_status(store_root: &Path) -> Result<SyncStatus> {
         let clean = git::is_clean(store_root)?;
         let branch = git::current_branch(store_root)?;
         let remote = select_sync_remote(store_root, branch.as_deref())?;
-        let remote_branch_exists = match (&branch, &remote) {
-            (Some(branch), Some(remote)) => {
-                Some(git::remote_branch_exists(store_root, remote, branch)?)
-            }
-            _ => None,
-        };
 
         Ok(SyncStatus {
             store_root: store_root.to_path_buf(),
             branch,
             remote,
             clean,
-            remote_branch_exists,
         })
     })
 }
