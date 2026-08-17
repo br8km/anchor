@@ -357,53 +357,41 @@ pub fn list_recipients(store_root: &Path) -> Result<Vec<String>> {
 pub fn add_recipient(store_root: &Path, recipient: &str) -> Result<RecipientReport> {
     let recipient = normalize_recipient(recipient)?;
 
-    with_mutating_vault(store_root, || {
-        let mut recipients = load_recipients(store_root)?;
-        if recipients.iter().any(|existing| existing == &recipient) {
-            bail!("recipient already exists");
-        }
+    update_recipients(
+        store_root,
+        &format!("Add recipient {recipient}"),
+        |recipients| {
+            if recipients.iter().any(|existing| existing == &recipient) {
+                bail!("recipient already exists");
+            }
 
-        recipients.push(recipient.clone());
-        reencrypt_vault(store_root, &recipients)?;
-        write_recipient_metadata(store_root, &recipients)?;
-        git::add_path(store_root, ".gpg-id")?;
-        git::commit(store_root, &format!("Add recipient {recipient}"))?;
-        Ok(())
-    })?;
-
-    Ok(RecipientReport {
-        store_root: store_root.to_path_buf(),
-        recipients: load_recipients(store_root)?,
-    })
+            recipients.push(recipient.clone());
+            Ok(())
+        },
+    )
 }
 
 pub fn remove_recipient(store_root: &Path, recipient: &str) -> Result<RecipientReport> {
     let recipient = normalize_recipient(recipient)?;
 
-    with_mutating_vault(store_root, || {
-        let mut recipients = load_recipients(store_root)?;
-        let original_len = recipients.len();
-        recipients.retain(|existing| existing != &recipient);
+    update_recipients(
+        store_root,
+        &format!("Remove recipient {recipient}"),
+        |recipients| {
+            let original_len = recipients.len();
+            recipients.retain(|existing| existing != &recipient);
 
-        if recipients.len() == original_len {
-            bail!("recipient does not exist");
-        }
+            if recipients.len() == original_len {
+                bail!("recipient does not exist");
+            }
 
-        if recipients.is_empty() {
-            bail!("at least one recipient is required");
-        }
+            if recipients.is_empty() {
+                bail!("at least one recipient is required");
+            }
 
-        reencrypt_vault(store_root, &recipients)?;
-        write_recipient_metadata(store_root, &recipients)?;
-        git::add_path(store_root, ".gpg-id")?;
-        git::commit(store_root, &format!("Remove recipient {recipient}"))?;
-        Ok(())
-    })?;
-
-    Ok(RecipientReport {
-        store_root: store_root.to_path_buf(),
-        recipients: load_recipients(store_root)?,
-    })
+            Ok(())
+        },
+    )
 }
 
 pub fn resolve_update_targets(store_root: &Path, targets: &[String]) -> Result<Vec<String>> {
@@ -721,37 +709,84 @@ fn ensure_git_clean(store_root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn reencrypt_vault(store_root: &Path, recipients: &[String]) -> Result<()> {
+fn update_recipients(
+    store_root: &Path,
+    commit_message: &str,
+    mutate: impl FnOnce(&mut Vec<String>) -> Result<()>,
+) -> Result<RecipientReport> {
+    with_mutating_vault(store_root, || {
+        let mut recipients = load_recipients(store_root)?;
+        mutate(&mut recipients)?;
+        let changed_entries = reencrypt_vault(store_root, &recipients)?;
+        write_recipient_metadata(store_root, &recipients)?;
+        for entry_path in changed_entries {
+            git::add_path(store_root, &entry_path)?;
+        }
+        git::add_path(store_root, ".gpg-id")?;
+        git::commit(store_root, commit_message)?;
+        Ok(())
+    })?;
+
+    Ok(RecipientReport {
+        store_root: store_root.to_path_buf(),
+        recipients: load_recipients(store_root)?,
+    })
+}
+
+#[derive(Debug)]
+struct ReencryptPlan {
+    entry_path: PathBuf,
+    staged_path: PathBuf,
+    backup_path: PathBuf,
+}
+
+fn reencrypt_vault(store_root: &Path, recipients: &[String]) -> Result<Vec<PathBuf>> {
     let mut names = Vec::new();
     collect_secrets(store_root, store_root, &mut names)?;
     names.sort();
 
-    let mut staged = Vec::with_capacity(names.len());
+    let mut plans = Vec::with_capacity(names.len());
     for name in names {
         let entry_path = secret::entry_path(store_root, &name)?;
         let body = secret::decrypt_entry(&entry_path)?;
         let staged_path = staged_entry_path(&entry_path);
+        let backup_path = backup_entry_path(&entry_path);
 
         if let Err(err) = secret::encrypt_entry(&staged_path, recipients, &body) {
-            cleanup_staged_entries(&staged);
+            cleanup_staged_entries(&plans);
             let _ = fs::remove_file(&staged_path);
             return Err(err);
         }
 
-        staged.push((staged_path, entry_path));
+        plans.push(ReencryptPlan {
+            entry_path,
+            staged_path,
+            backup_path,
+        });
     }
 
-    for (staged_path, entry_path) in &staged {
-        fs::rename(staged_path, entry_path).with_context(|| {
-            format!(
-                "failed to replace {} with {}",
-                entry_path.display(),
-                staged_path.display()
-            )
-        })?;
+    for (backups_created, plan) in plans.iter().enumerate() {
+        if let Err(err) = fs::rename(&plan.entry_path, &plan.backup_path) {
+            rollback_backups(&plans[..backups_created]);
+            cleanup_staged_entries(&plans);
+            return Err(err)
+                .with_context(|| format!("failed to preserve {}", plan.entry_path.display()));
+        }
     }
 
-    Ok(())
+    for plan in &plans {
+        if let Err(err) = fs::rename(&plan.staged_path, &plan.entry_path) {
+            rollback_backups(&plans);
+            cleanup_backups(&plans);
+            cleanup_staged_entries(&plans);
+            return Err(err)
+                .with_context(|| format!("failed to install {}", plan.entry_path.display()));
+        }
+    }
+
+    cleanup_backups(&plans);
+
+    Ok(plans.into_iter().map(|plan| plan.entry_path).collect())
 }
 
 fn staged_entry_path(entry_path: &Path) -> PathBuf {
@@ -768,9 +803,35 @@ fn staged_entry_path(entry_path: &Path) -> PathBuf {
     staged
 }
 
-fn cleanup_staged_entries(staged: &[(PathBuf, PathBuf)]) {
-    for (staged_path, _) in staged {
-        let _ = fs::remove_file(staged_path);
+fn backup_entry_path(entry_path: &Path) -> PathBuf {
+    let mut backup = entry_path.to_path_buf();
+    let file_name = entry_path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("entry.gpg");
+    backup.set_file_name(format!(
+        "{file_name}.anchor-reencrypt-backup-{}-{}.bak",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    backup
+}
+
+fn rollback_backups(plans: &[ReencryptPlan]) {
+    for plan in plans.iter().rev() {
+        let _ = fs::rename(&plan.backup_path, &plan.entry_path);
+    }
+}
+
+fn cleanup_staged_entries(plans: &[ReencryptPlan]) {
+    for plan in plans {
+        let _ = fs::remove_file(&plan.staged_path);
+    }
+}
+
+fn cleanup_backups(plans: &[ReencryptPlan]) {
+    for plan in plans {
+        let _ = fs::remove_file(&plan.backup_path);
     }
 }
 
