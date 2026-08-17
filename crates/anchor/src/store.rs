@@ -753,8 +753,11 @@ fn reencrypt_vault(store_root: &Path, recipients: &[String]) -> Result<Vec<PathB
         let backup_path = backup_entry_path(&entry_path);
 
         if let Err(err) = secret::encrypt_entry(&staged_path, recipients, &body) {
-            cleanup_staged_entries(&plans);
-            let _ = fs::remove_file(&staged_path);
+            cleanup_staged_entries(&plans)?;
+            if staged_path.exists() {
+                fs::remove_file(&staged_path)
+                    .with_context(|| format!("failed to remove {}", staged_path.display()))?;
+            }
             return Err(err);
         }
 
@@ -767,8 +770,8 @@ fn reencrypt_vault(store_root: &Path, recipients: &[String]) -> Result<Vec<PathB
 
     for (backups_created, plan) in plans.iter().enumerate() {
         if let Err(err) = fs::rename(&plan.entry_path, &plan.backup_path) {
-            rollback_backups(&plans[..backups_created]);
-            cleanup_staged_entries(&plans);
+            rollback_backups(&plans[..backups_created])?;
+            cleanup_staged_entries(&plans)?;
             return Err(err)
                 .with_context(|| format!("failed to preserve {}", plan.entry_path.display()));
         }
@@ -776,15 +779,15 @@ fn reencrypt_vault(store_root: &Path, recipients: &[String]) -> Result<Vec<PathB
 
     for plan in &plans {
         if let Err(err) = fs::rename(&plan.staged_path, &plan.entry_path) {
-            rollback_backups(&plans);
-            cleanup_backups(&plans);
-            cleanup_staged_entries(&plans);
+            rollback_backups(&plans)?;
+            cleanup_backups(&plans)?;
+            cleanup_staged_entries(&plans)?;
             return Err(err)
                 .with_context(|| format!("failed to install {}", plan.entry_path.display()));
         }
     }
 
-    cleanup_backups(&plans);
+    cleanup_backups(&plans)?;
 
     Ok(plans.into_iter().map(|plan| plan.entry_path).collect())
 }
@@ -817,22 +820,40 @@ fn backup_entry_path(entry_path: &Path) -> PathBuf {
     backup
 }
 
-fn rollback_backups(plans: &[ReencryptPlan]) {
+fn rollback_backups(plans: &[ReencryptPlan]) -> Result<()> {
     for plan in plans.iter().rev() {
-        let _ = fs::rename(&plan.backup_path, &plan.entry_path);
+        fs::rename(&plan.backup_path, &plan.entry_path).with_context(|| {
+            format!(
+                "failed to restore {} from {}",
+                plan.entry_path.display(),
+                plan.backup_path.display()
+            )
+        })?;
     }
+
+    Ok(())
 }
 
-fn cleanup_staged_entries(plans: &[ReencryptPlan]) {
+fn cleanup_staged_entries(plans: &[ReencryptPlan]) -> Result<()> {
     for plan in plans {
-        let _ = fs::remove_file(&plan.staged_path);
+        if plan.staged_path.exists() {
+            fs::remove_file(&plan.staged_path)
+                .with_context(|| format!("failed to remove {}", plan.staged_path.display()))?;
+        }
     }
+
+    Ok(())
 }
 
-fn cleanup_backups(plans: &[ReencryptPlan]) {
+fn cleanup_backups(plans: &[ReencryptPlan]) -> Result<()> {
     for plan in plans {
-        let _ = fs::remove_file(&plan.backup_path);
+        if plan.backup_path.exists() {
+            fs::remove_file(&plan.backup_path)
+                .with_context(|| format!("failed to remove {}", plan.backup_path.display()))?;
+        }
     }
+
+    Ok(())
 }
 
 fn with_mutating_vault<T>(store_root: &Path, action: impl FnOnce() -> Result<T>) -> Result<T> {
