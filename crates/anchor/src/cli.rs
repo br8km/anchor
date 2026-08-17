@@ -49,6 +49,7 @@ enum Commands {
     Grep(GrepArgs),
     Import(ImportArgs),
     Export(ExportArgs),
+    Sync(SyncArgs),
     Otp(OtpArgs),
     Recipients(RecipientsArgs),
 }
@@ -99,6 +100,17 @@ struct ImportArgs {
 struct ExportArgs {
     #[arg(value_name = "FILEPATH")]
     path: PathBuf,
+}
+
+#[derive(Args, Debug, Default)]
+struct SyncArgs {
+    #[command(subcommand)]
+    action: Option<SyncAction>,
+}
+
+#[derive(Subcommand, Debug)]
+enum SyncAction {
+    Status,
 }
 
 #[derive(Args, Debug)]
@@ -259,6 +271,38 @@ pub fn run() -> Result<()> {
                 report.destination.display()
             );
         }
+        Commands::Sync(args) => match args.action {
+            None => {
+                let report = store::sync(&cli.store)?;
+                println!("synced store at {}", report.store_root.display());
+                if let Some(remote) = report.remote {
+                    println!("remote: {remote}");
+                } else {
+                    println!("no remote configured");
+                }
+                if report.pulled {
+                    println!("pulled latest remote changes");
+                }
+                if report.pushed {
+                    println!("pushed local commits");
+                }
+            }
+            Some(SyncAction::Status) => {
+                let status = store::sync_status(&cli.store)?;
+                println!("sync status for {}", status.store_root.display());
+                println!("branch: {}", status.branch.as_deref().unwrap_or("detached"));
+                println!("state: {}", if status.clean { "clean" } else { "dirty" });
+                match status.remote {
+                    Some(remote) => println!("remote: {remote}"),
+                    None => println!("remote: none"),
+                }
+                match status.remote_branch_exists {
+                    Some(true) => println!("remote branch: present"),
+                    Some(false) => println!("remote branch: missing"),
+                    None => {}
+                }
+            }
+        },
         Commands::Otp(args) => match args.action {
             OtpAction::Add(args) => {
                 let input = read_stdin()?;

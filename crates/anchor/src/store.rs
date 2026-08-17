@@ -40,6 +40,24 @@ pub struct ExportReport {
     pub exported: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncReport {
+    pub store_root: PathBuf,
+    pub branch: Option<String>,
+    pub remote: Option<String>,
+    pub pulled: bool,
+    pub pushed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncStatus {
+    pub store_root: PathBuf,
+    pub branch: Option<String>,
+    pub remote: Option<String>,
+    pub clean: bool,
+    pub remote_branch_exists: Option<bool>,
+}
+
 pub fn init(store_root: &Path, recipients: &[String]) -> Result<InitReport> {
     ensure_bootstrap_target_is_safe(store_root)?;
 
@@ -101,6 +119,55 @@ pub fn vault_status(store_root: &Path) -> Result<VaultStatus> {
     Ok(VaultStatus {
         store_root: store_root.to_path_buf(),
         open,
+    })
+}
+
+pub fn sync(store_root: &Path) -> Result<SyncReport> {
+    with_mutating_vault(store_root, || {
+        let branch = git::current_branch(store_root)?
+            .context("git repository has no current branch to sync")?;
+        let remote = select_sync_remote(store_root, Some(&branch))?;
+        let mut pulled = false;
+        let mut pushed = false;
+
+        if let Some(remote) = remote.as_deref() {
+            if git::remote_branch_exists(store_root, remote, &branch)? {
+                git::pull_ff_only(store_root, remote, &branch)?;
+                pulled = true;
+            }
+            git::push(store_root, remote, &branch)?;
+            pushed = true;
+        }
+
+        Ok(SyncReport {
+            store_root: store_root.to_path_buf(),
+            branch: Some(branch),
+            remote,
+            pulled,
+            pushed,
+        })
+    })
+}
+
+pub fn sync_status(store_root: &Path) -> Result<SyncStatus> {
+    with_readonly_vault(store_root, || {
+        let clean = git::is_clean(store_root)?;
+        let branch = git::current_branch(store_root)?;
+        let remote = select_sync_remote(store_root, branch.as_deref())?;
+        let remote_branch_exists = match (&branch, &remote) {
+            (Some(branch), Some(remote)) => {
+                Some(git::remote_branch_exists(store_root, remote, branch)?)
+            }
+            _ => None,
+        };
+
+        Ok(SyncStatus {
+            store_root: store_root.to_path_buf(),
+            branch,
+            remote,
+            clean,
+            remote_branch_exists,
+        })
     })
 }
 
@@ -707,6 +774,25 @@ fn ensure_git_clean(store_root: &Path) -> Result<()> {
         bail!("git working tree is dirty");
     }
     Ok(())
+}
+
+fn select_sync_remote(store_root: &Path, branch: Option<&str>) -> Result<Option<String>> {
+    if let Some(branch) = branch {
+        if let Some(remote) = git::branch_remote(store_root, branch)? {
+            return Ok(Some(remote));
+        }
+    }
+
+    let remotes = git::remotes(store_root)?;
+    if remotes.is_empty() {
+        return Ok(None);
+    }
+
+    if remotes.iter().any(|remote| remote == "origin") {
+        return Ok(Some("origin".to_string()));
+    }
+
+    Ok(remotes.into_iter().next())
 }
 
 fn update_recipients(

@@ -4,8 +4,7 @@
 
 **Blocked by:** 01 — Store bootstrap and vault lifecycle
 
-**Status:** ready-for-agent
+**Status:** implemented
 
-- [ ] `anchor sync` and `anchor sync status` work against the local Git repository and optional remote configuration.
-- [ ] Sync pulls before mutation, commits local changes, pushes when a remote exists, and fails closed on dirty or divergent state.
-
+- [x] `anchor sync` and `anchor sync status` work against the local Git repository and optional remote configuration.
+- [x] Sync pulls before mutation, commits local changes, pushes when a remote exists, and fails closed on dirty or divergent state.
