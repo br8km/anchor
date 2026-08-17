@@ -91,34 +91,39 @@ log_cmd() {
   fi
 }
 mode=""
+recipients=""
+target=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --encrypt|--decrypt)
       mode="$1"
       shift
-      break
       ;;
     --trust-model)
       shift 2
       ;;
     --recipient)
+      recipients="${recipients}${recipients:+,}$2"
       shift 2
       ;;
     --batch|--yes|always)
       shift
       ;;
     *)
+      if [ -z "$target" ]; then
+        target="$1"
+      fi
       shift
       ;;
   esac
 done
-log_cmd "$mode $*"
+log_cmd "$mode recipients=${recipients:-none} ${target:-}"
 case "$mode" in
   --encrypt)
     cat
     ;;
   --decrypt)
-    cat "$1"
+    cat "$target"
     ;;
   *)
     exit 1
@@ -257,6 +262,124 @@ fn add_edit_generate_and_remove_secret_entries() {
     assert!(
         tomb_events.lines().last() == Some("close vault"),
         "secret commands should close the vault after mutation"
+    );
+}
+
+#[test]
+fn recipient_management_lists_and_reencrypts_secret_entries() {
+    let tmp = TempDir::new().expect("tempdir");
+    let store = store_path(&tmp);
+    let _gpg = fake_gpg(&tmp);
+    let gpg_log = tmp.path().join("gpg.log");
+    let tomb_log = tmp.path().join("tomb.log");
+    let secret_name = "services/email";
+    let secret_path = store.join("services/email.gpg");
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["init", "--recipient", "alice@example.com"])
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["add", secret_name])
+        .write_stdin("first-secret\nurl=https://example.test\nnotes=keep\n")
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["recipients", "list"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("alice@example.com"));
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["recipients", "add", "bob@example.com"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("added recipient bob@example.com"));
+
+    assert_eq!(
+        fs::read_to_string(store.join(".gpg-id")).expect("read updated recipients"),
+        "alice@example.com\nbob@example.com\n",
+        "adding a recipient should update the vault recipient metadata"
+    );
+    assert_eq!(
+        fs::read_to_string(&secret_path).expect("read reencrypted secret"),
+        "first-secret\nurl=https://example.test\nnotes=keep\n",
+        "adding a recipient should re-encrypt the existing secret without changing its body"
+    );
+
+    let gpg_events = fs::read_to_string(&gpg_log).expect("read gpg log");
+    assert!(
+        gpg_events.contains("recipients=alice@example.com,bob@example.com"),
+        "recipient rotation should re-encrypt existing entries with the expanded recipient set"
+    );
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["recipients", "remove", "alice@example.com"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "removed recipient alice@example.com",
+        ));
+
+    assert_eq!(
+        fs::read_to_string(store.join(".gpg-id")).expect("read reduced recipients"),
+        "bob@example.com\n",
+        "removing a recipient should shrink the vault recipient metadata"
+    );
+    assert_eq!(
+        fs::read_to_string(&secret_path).expect("read rotated secret"),
+        "first-secret\nurl=https://example.test\nnotes=keep\n",
+        "removing the old recipient should keep the secret body intact after re-encryption"
+    );
+
+    let gpg_events = fs::read_to_string(&gpg_log).expect("read gpg log after removal");
+    assert!(
+        gpg_events.contains("recipients=bob@example.com"),
+        "recipient removal should re-encrypt remaining entries for the surviving recipient set"
+    );
+}
+
+#[test]
+fn recipient_management_rejects_removing_the_last_recipient() {
+    let tmp = TempDir::new().expect("tempdir");
+    let store = store_path(&tmp);
+    let _gpg = fake_gpg(&tmp);
+    let gpg_log = tmp.path().join("gpg.log");
+    let tomb_log = tmp.path().join("tomb.log");
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["init", "--recipient", "alice@example.com"])
+        .assert()
+        .success();
+
+    command_with_env(&tmp, &store)
+        .env("GPG_LOG", &gpg_log)
+        .env("TOMB_LOG", &tomb_log)
+        .args(["recipients", "remove", "alice@example.com"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "at least one recipient is required",
+        ));
+
+    assert_eq!(
+        fs::read_to_string(store.join(".gpg-id")).expect("read original recipients"),
+        "alice@example.com\n",
+        "removing the final recipient should leave the vault recipient set unchanged"
     );
 }
 

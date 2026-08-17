@@ -4,8 +4,7 @@
 
 **Blocked by:** 01 — Store bootstrap and vault lifecycle
 
-**Status:** ready-for-agent
+**Status:** implemented
 
-- [ ] `anchor recipients add`, `anchor recipients remove`, and `anchor recipients list` work against the current vault recipient set.
-- [ ] Re-encryption preserves decryptability for the remaining recipients and supports safe key rotation without losing vault access.
-
+- [x] `anchor recipients add`, `anchor recipients remove`, and `anchor recipients list` work against the current vault recipient set.
+- [x] Re-encryption preserves decryptability for the remaining recipients and supports safe key rotation without losing vault access.

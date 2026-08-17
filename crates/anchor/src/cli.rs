@@ -50,6 +50,7 @@ enum Commands {
     Import(ImportArgs),
     Export(ExportArgs),
     Otp(OtpArgs),
+    Recipients(RecipientsArgs),
 }
 
 #[derive(Args, Debug, Default)]
@@ -140,6 +141,25 @@ struct OtpUriArgs {
 struct OtpValidateArgs {
     #[arg(value_name = "URI")]
     uri: String,
+}
+
+#[derive(Args, Debug)]
+struct RecipientsArgs {
+    #[command(subcommand)]
+    action: RecipientAction,
+}
+
+#[derive(Subcommand, Debug)]
+enum RecipientAction {
+    Add(RecipientNameArgs),
+    Remove(RecipientNameArgs),
+    List,
+}
+
+#[derive(Args, Debug)]
+struct RecipientNameArgs {
+    #[arg(value_name = "RECIPIENT")]
+    recipient: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -267,6 +287,27 @@ pub fn run() -> Result<()> {
             }
             OtpAction::Validate(args) => {
                 totp::validate_uri(&args.uri)?;
+            }
+        },
+        Commands::Recipients(args) => match args.action {
+            RecipientAction::Add(args) => {
+                let report = store::add_recipient(&cli.store, &args.recipient)?;
+                println!("added recipient {}", args.recipient);
+                for recipient in report.recipients {
+                    println!("{recipient}");
+                }
+            }
+            RecipientAction::Remove(args) => {
+                let report = store::remove_recipient(&cli.store, &args.recipient)?;
+                println!("removed recipient {}", args.recipient);
+                for recipient in report.recipients {
+                    println!("{recipient}");
+                }
+            }
+            RecipientAction::List => {
+                for recipient in store::list_recipients(&cli.store)? {
+                    println!("{recipient}");
+                }
             }
         },
         Commands::Vault(args) => match args.action {

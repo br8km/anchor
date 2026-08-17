@@ -23,6 +23,12 @@ pub struct SecretReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecipientReport {
+    pub store_root: PathBuf,
+    pub recipients: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportReport {
     pub source: PathBuf,
     pub imported: usize,
@@ -344,6 +350,62 @@ pub fn export_secrets(store_root: &Path, destination: &Path) -> Result<ExportRep
     })
 }
 
+pub fn list_recipients(store_root: &Path) -> Result<Vec<String>> {
+    with_readonly_vault(store_root, || load_recipients(store_root))
+}
+
+pub fn add_recipient(store_root: &Path, recipient: &str) -> Result<RecipientReport> {
+    let recipient = normalize_recipient(recipient)?;
+
+    with_mutating_vault(store_root, || {
+        let mut recipients = load_recipients(store_root)?;
+        if recipients.iter().any(|existing| existing == &recipient) {
+            bail!("recipient already exists");
+        }
+
+        recipients.push(recipient.clone());
+        reencrypt_vault(store_root, &recipients)?;
+        write_recipient_metadata(store_root, &recipients)?;
+        git::add_path(store_root, ".gpg-id")?;
+        git::commit(store_root, &format!("Add recipient {recipient}"))?;
+        Ok(())
+    })?;
+
+    Ok(RecipientReport {
+        store_root: store_root.to_path_buf(),
+        recipients: load_recipients(store_root)?,
+    })
+}
+
+pub fn remove_recipient(store_root: &Path, recipient: &str) -> Result<RecipientReport> {
+    let recipient = normalize_recipient(recipient)?;
+
+    with_mutating_vault(store_root, || {
+        let mut recipients = load_recipients(store_root)?;
+        let original_len = recipients.len();
+        recipients.retain(|existing| existing != &recipient);
+
+        if recipients.len() == original_len {
+            bail!("recipient does not exist");
+        }
+
+        if recipients.is_empty() {
+            bail!("at least one recipient is required");
+        }
+
+        reencrypt_vault(store_root, &recipients)?;
+        write_recipient_metadata(store_root, &recipients)?;
+        git::add_path(store_root, ".gpg-id")?;
+        git::commit(store_root, &format!("Remove recipient {recipient}"))?;
+        Ok(())
+    })?;
+
+    Ok(RecipientReport {
+        store_root: store_root.to_path_buf(),
+        recipients: load_recipients(store_root)?,
+    })
+}
+
 pub fn resolve_update_targets(store_root: &Path, targets: &[String]) -> Result<Vec<String>> {
     ensure_store_exists(store_root)?;
 
@@ -659,6 +721,59 @@ fn ensure_git_clean(store_root: &Path) -> Result<()> {
     Ok(())
 }
 
+fn reencrypt_vault(store_root: &Path, recipients: &[String]) -> Result<()> {
+    let mut names = Vec::new();
+    collect_secrets(store_root, store_root, &mut names)?;
+    names.sort();
+
+    let mut staged = Vec::with_capacity(names.len());
+    for name in names {
+        let entry_path = secret::entry_path(store_root, &name)?;
+        let body = secret::decrypt_entry(&entry_path)?;
+        let staged_path = staged_entry_path(&entry_path);
+
+        if let Err(err) = secret::encrypt_entry(&staged_path, recipients, &body) {
+            cleanup_staged_entries(&staged);
+            let _ = fs::remove_file(&staged_path);
+            return Err(err);
+        }
+
+        staged.push((staged_path, entry_path));
+    }
+
+    for (staged_path, entry_path) in &staged {
+        fs::rename(staged_path, entry_path).with_context(|| {
+            format!(
+                "failed to replace {} with {}",
+                entry_path.display(),
+                staged_path.display()
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+fn staged_entry_path(entry_path: &Path) -> PathBuf {
+    let mut staged = entry_path.to_path_buf();
+    let file_name = entry_path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("entry.gpg");
+    staged.set_file_name(format!(
+        "{file_name}.anchor-reencrypt-{}-{}.tmp",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    staged
+}
+
+fn cleanup_staged_entries(staged: &[(PathBuf, PathBuf)]) {
+    for (staged_path, _) in staged {
+        let _ = fs::remove_file(staged_path);
+    }
+}
+
 fn with_mutating_vault<T>(store_root: &Path, action: impl FnOnce() -> Result<T>) -> Result<T> {
     ensure_store_exists(store_root)?;
     ensure_git_clean(store_root)?;
@@ -720,6 +835,15 @@ fn load_recipients(store_root: &Path) -> Result<Vec<String>> {
     }
 
     Ok(recipients)
+}
+
+fn normalize_recipient(recipient: &str) -> Result<String> {
+    let recipient = recipient.trim();
+    if recipient.is_empty() {
+        bail!("recipient is required");
+    }
+
+    Ok(recipient.to_string())
 }
 
 fn relative_entry_path(store_root: &Path, entry_path: &Path) -> Result<PathBuf> {
