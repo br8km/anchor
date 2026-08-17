@@ -3,7 +3,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::git;
@@ -718,7 +718,6 @@ fn update_recipients(
         let mut recipients = load_recipients(store_root)?;
         mutate(&mut recipients)?;
         let changed_entries = reencrypt_vault(store_root, &recipients)?;
-        write_recipient_metadata(store_root, &recipients)?;
         for entry_path in changed_entries {
             git::add_path(store_root, &entry_path)?;
         }
@@ -787,6 +786,7 @@ fn reencrypt_vault(store_root: &Path, recipients: &[String]) -> Result<Vec<PathB
         }
     }
 
+    write_recipient_metadata(store_root, recipients)?;
     cleanup_backups(&plans)?;
 
     Ok(plans.into_iter().map(|plan| plan.entry_path).collect())
@@ -821,39 +821,68 @@ fn backup_entry_path(entry_path: &Path) -> PathBuf {
 }
 
 fn rollback_backups(plans: &[ReencryptPlan]) -> Result<()> {
+    let mut first_error = None;
     for plan in plans.iter().rev() {
-        fs::rename(&plan.backup_path, &plan.entry_path).with_context(|| {
-            format!(
-                "failed to restore {} from {}",
-                plan.entry_path.display(),
-                plan.backup_path.display()
-            )
-        })?;
+        if let Err(err) = fs::rename(&plan.backup_path, &plan.entry_path) {
+            if first_error.is_none() {
+                first_error = Some(anyhow!(
+                    "failed to restore {} from {}: {}",
+                    plan.entry_path.display(),
+                    plan.backup_path.display(),
+                    err
+                ));
+            }
+        }
     }
 
-    Ok(())
+    match first_error {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
 }
 
 fn cleanup_staged_entries(plans: &[ReencryptPlan]) -> Result<()> {
+    let mut first_error = None;
     for plan in plans {
         if plan.staged_path.exists() {
-            fs::remove_file(&plan.staged_path)
-                .with_context(|| format!("failed to remove {}", plan.staged_path.display()))?;
+            if let Err(err) = fs::remove_file(&plan.staged_path) {
+                if first_error.is_none() {
+                    first_error = Some(anyhow!(
+                        "failed to remove {}: {}",
+                        plan.staged_path.display(),
+                        err
+                    ));
+                }
+            }
         }
     }
 
-    Ok(())
+    match first_error {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
 }
 
 fn cleanup_backups(plans: &[ReencryptPlan]) -> Result<()> {
+    let mut first_error = None;
     for plan in plans {
         if plan.backup_path.exists() {
-            fs::remove_file(&plan.backup_path)
-                .with_context(|| format!("failed to remove {}", plan.backup_path.display()))?;
+            if let Err(err) = fs::remove_file(&plan.backup_path) {
+                if first_error.is_none() {
+                    first_error = Some(anyhow!(
+                        "failed to remove {}: {}",
+                        plan.backup_path.display(),
+                        err
+                    ));
+                }
+            }
         }
     }
 
-    Ok(())
+    match first_error {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
 }
 
 fn with_mutating_vault<T>(store_root: &Path, action: impl FnOnce() -> Result<T>) -> Result<T> {
